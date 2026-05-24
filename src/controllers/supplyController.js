@@ -340,10 +340,15 @@ async function listSupplyItems(req, res) {
 async function updateSupplyItem(req, res) {
   try {
     const businessId = req.businessId;
+    const userId = req.user?.userId;
     const id = req.params.id;
     const body = req.body || {};
     const existing = await prisma.supplyItem.findFirst({
-      where: { id, businessId, isActive: true },
+      where: {
+        id,
+        isActive: true,
+        OR: supplyVisibilityOrBranches(businessId, userId),
+      },
       include: { category: true },
     });
     if (!existing) return errorResponse(res, "Supply item not found", 404, "NOT_FOUND");
@@ -457,9 +462,14 @@ async function updateSupplyItem(req, res) {
 async function deleteSupplyItem(req, res) {
   try {
     const businessId = req.businessId;
+    const userId = req.user?.userId;
     const id = req.params.id;
     const existing = await prisma.supplyItem.findFirst({
-      where: { id, businessId, isActive: true },
+      where: {
+        id,
+        isActive: true,
+        OR: supplyVisibilityOrBranches(businessId, userId),
+      },
       select: { id: true },
     });
     if (!existing) return errorResponse(res, "Supply item not found", 404, "NOT_FOUND");
