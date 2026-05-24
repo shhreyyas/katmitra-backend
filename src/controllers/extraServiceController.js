@@ -10,10 +10,25 @@ const {
 
 const PRICING_TYPES = new Set(["FIXED", "PER_UNIT", "PER_GUEST"]);
 
+function deriveIsGlobal(businessId, createdByUserId) {
+  if (businessId == null || businessId === "") return true;
+  if (createdByUserId == null || createdByUserId === "") return true;
+  return false;
+}
+
+function extraServiceVisibilityOrBranches(businessId, userId) {
+  return [
+    { businessId, OR: [{ isGlobal: true }, { createdByUserId: userId }] },
+    { businessId: null, OR: [{ createdByUserId: userId }, { isGlobal: true }] },
+    { createdByUserId: userId },
+  ];
+}
+
 function serializeExtraService(row) {
   return {
     id: row.id,
-    business_id: row.businessId,
+    business_id: row.businessId ?? null,
+    is_global: deriveIsGlobal(row.businessId, row.createdByUserId),
     title: row.title,
     description: row.description ?? null,
     pricing_type: row.pricingType,
@@ -80,14 +95,15 @@ async function recalcBookingTotalDue(bookingId) {
 async function listExtraServices(req, res) {
   try {
     const businessId = req.businessId;
+    const userId = req.user?.userId;
     const activeOnly =
       req.query.active_only === "1" ||
       req.query.active_only === "true" ||
       req.query.active === "true";
-    const where = { businessId };
-    if (activeOnly) where.isActive = true;
+    const filterAnd = [{ OR: extraServiceVisibilityOrBranches(businessId, userId) }];
+    if (activeOnly) filterAnd.push({ isActive: true });
     const rows = await prisma.extraService.findMany({
-      where,
+      where: { AND: filterAnd },
       orderBy: [{ title: "asc" }],
     });
     return successResponse(res, "OK", {
@@ -102,6 +118,7 @@ async function listExtraServices(req, res) {
 async function createExtraService(req, res) {
   try {
     const businessId = req.businessId;
+    const userId = req.user?.userId;
     const body = req.body || {};
     const title = String(body.title ?? "").trim();
     if (!title) {
@@ -115,6 +132,8 @@ async function createExtraService(req, res) {
     const row = await prisma.extraService.create({
       data: {
         businessId,
+        createdByUserId: userId ?? null,
+        isGlobal: deriveIsGlobal(businessId, userId),
         title,
         description: body.description ? String(body.description) : null,
         pricingType,
@@ -242,7 +261,11 @@ async function setBookingExtraServices(req, res) {
     const servicesById = new Map();
     if (serviceIds.length > 0) {
       const services = await prisma.extraService.findMany({
-        where: { id: { in: serviceIds }, businessId, isActive: true },
+        where: {
+          id: { in: serviceIds },
+          isActive: true,
+          OR: extraServiceVisibilityOrBranches(businessId, req.user?.userId),
+        },
       });
       if (services.length !== serviceIds.length) {
         return errorResponse(res, "Extra service not found", 404, "NOT_FOUND");
@@ -267,7 +290,17 @@ async function setBookingExtraServices(req, res) {
         svc.pricingType === "FIXED"
           ? 1
           : Math.max(1, parseInt(String(line.quantity ?? 1), 10) || 1);
-      const unitPrice = num(svc.price);
+      const catalogUnit = num(svc.price);
+      const requestedUnit =
+        line.unit_price != null
+          ? num(line.unit_price)
+          : line.unitPrice != null
+            ? num(line.unitPrice)
+            : catalogUnit;
+      const unitPrice =
+        Number.isFinite(requestedUnit) && requestedUnit >= 0
+          ? requestedUnit
+          : catalogUnit;
       const lineTotal = computeLineTotal(
         svc.pricingType,
         unitPrice,

@@ -3,6 +3,11 @@ function num(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** Whole rupees (no paise) for booking totals shown to customers. */
+function roundInr(v) {
+  return Math.round(num(v));
+}
+
 /** Food-only amount from snapshot plate × guests (ignores `eventTotal`). */
 function deriveEventFoodSubtotal(ev) {
   const guests = Math.max(0, Number(ev?.guestCount ?? 0) || 0);
@@ -31,22 +36,23 @@ function computeBookingTotalDueFromEvents(booking) {
     (s, l) => s + num(l.lineTotal),
     0,
   );
-  if (foodSum <= 0 && extrasSum <= 0) return 0;
+  const preTaxSubtotal = roundInr(foodSum + extrasSum);
+  if (preTaxSubtotal <= 0) return 0;
 
-  let serviceAmt = num(booking.serviceChargeAmount);
   const servicePct = num(booking.serviceChargePct);
-  if (serviceAmt <= 0 && servicePct > 0) {
-    serviceAmt = foodSum * (servicePct / 100);
-  }
+  let serviceAmt = roundInr(
+    servicePct > 0
+      ? preTaxSubtotal * (servicePct / 100)
+      : num(booking.serviceChargeAmount),
+  );
 
-  let taxAmt = num(booking.taxAmount);
   const taxPct = num(booking.taxPct);
-  if (taxAmt <= 0 && taxPct > 0) {
-    taxAmt = (foodSum + serviceAmt) * (taxPct / 100);
-  }
+  let taxAmt = roundInr(
+    taxPct > 0 ? preTaxSubtotal * (taxPct / 100) : num(booking.taxAmount),
+  );
 
-  const disc = num(booking.discountAmount);
-  return Math.max(0, foodSum + serviceAmt + taxAmt - disc + extrasSum);
+  const disc = roundInr(num(booking.discountAmount));
+  return Math.max(0, roundInr(preTaxSubtotal + serviceAmt + taxAmt - disc));
 }
 
 function paymentStatusFromAmounts(amountPaid, totalDue) {
@@ -59,6 +65,7 @@ function paymentStatusFromAmounts(amountPaid, totalDue) {
 
 module.exports = {
   num,
+  roundInr,
   deriveEventFoodSubtotal,
   deriveEventSubtotal,
   computeBookingTotalDueFromEvents,

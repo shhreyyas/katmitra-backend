@@ -27,12 +27,23 @@ function supplyVisibilityOrBranches(businessId, userId) {
   ];
 }
 
-/** Utensil rows with `availableCount` cap booking quantities. */
-function utensilStockExceededMessage(source, requestedQty) {
+/** Remaining assignable stock for a utensil (total − damaged − assigned elsewhere). */
+function effectiveUtensilAssignable(source, assignedElsewhere = 0) {
   if (source.type !== "UTENSIL" || source.availableCount == null) return null;
+  const total = Math.max(0, Number(source.availableCount) || 0);
+  const damaged = Math.max(0, Number(source.damagedCount) || 0);
+  const assigned = Math.max(0, Number(assignedElsewhere) || 0);
+  return Math.max(0, total - damaged - assigned);
+}
+
+/** Utensil rows cap booking quantities to remaining assignable stock. */
+function utensilStockExceededMessage(source, requestedQty, assignedElsewhere = 0) {
+  if (source.type !== "UTENSIL" || source.availableCount == null) return null;
+  const cap = effectiveUtensilAssignable(source, assignedElsewhere);
+  if (cap == null) return null;
   const q = parseInt(String(requestedQty), 10);
   const qty = Number.isFinite(q) ? q : 0;
-  if (qty > source.availableCount) {
+  if (qty > cap) {
     return "Quantity cannot exceed remaining stock for this utensil";
   }
   return null;
@@ -58,6 +69,7 @@ function serializeSupplyItem(row, lang) {
     unit_options: row.unitOptions ?? [],
     default_unit: row.defaultUnit,
     available_count: row.availableCount ?? null,
+    damaged_count: row.type === "UTENSIL" ? Math.max(0, row.damagedCount ?? 0) : 0,
     photo_url: row.photoUrl ?? null,
     is_active: row.isActive,
     created_at: row.createdAt,
@@ -197,6 +209,23 @@ async function createSupplyItem(req, res) {
       );
     }
 
+    const availableCount =
+      body.available_count == null
+        ? null
+        : Math.max(0, parseInt(String(body.available_count), 10) || 0);
+    const damagedCount =
+      type === "UTENSIL"
+        ? Math.max(0, parseInt(String(body.damaged_count ?? 0), 10) || 0)
+        : 0;
+    if (availableCount != null && damagedCount > availableCount) {
+      return errorResponse(
+        res,
+        "damaged_count cannot exceed available_count",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
     const row = await prisma.supplyItem.create({
       data: {
         businessId,
@@ -207,10 +236,8 @@ async function createSupplyItem(req, res) {
         name: names,
         unitOptions,
         defaultUnit,
-        availableCount:
-          body.available_count == null
-            ? null
-            : Math.max(0, parseInt(String(body.available_count), 10) || 0),
+        availableCount,
+        damagedCount,
         photoUrl: body.photo_url ?? null,
       },
       include: { category: true },
@@ -345,6 +372,11 @@ async function updateSupplyItem(req, res) {
                 : Math.max(0, Number(body.available_count) || 0),
           }
         : {}),
+      ...(body.damaged_count !== undefined && existing.type === "UTENSIL"
+        ? {
+            damagedCount: Math.max(0, Number(body.damaged_count) || 0),
+          }
+        : {}),
       ...(body.photo_url !== undefined ? { photoUrl: body.photo_url } : {}),
     };
     if (Array.isArray(body.unit_options)) {
@@ -384,6 +416,24 @@ async function updateSupplyItem(req, res) {
       return errorResponse(
         res,
         "default_unit must be one of unit_options",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+    const finalAvailableCount =
+      patch.availableCount !== undefined
+        ? patch.availableCount
+        : existing.availableCount;
+    const finalDamagedCount =
+      patch.damagedCount !== undefined ? patch.damagedCount : existing.damagedCount ?? 0;
+    if (
+      existing.type === "UTENSIL" &&
+      finalAvailableCount != null &&
+      finalDamagedCount > finalAvailableCount
+    ) {
+      return errorResponse(
+        res,
+        "damaged_count cannot exceed available_count",
         200,
         "VALIDATION_ERROR",
       );
@@ -561,7 +611,7 @@ async function setBookingSupplyItems(req, res) {
     for (const row of payload) {
       const source = byId.get(String(row.supply_item_id || "").trim());
       if (!source) continue;
-      const msg = utensilStockExceededMessage(source, row.quantity);
+      const msg = utensilStockExceededMessage(source, row.quantity, 0);
       if (msg) return errorResponse(res, msg, 200, "VALIDATION_ERROR");
     }
 
@@ -575,12 +625,9 @@ async function setBookingSupplyItems(req, res) {
               1,
               Math.min(999, parseInt(String(row.quantity), 10) || 1),
             );
-            if (
-              source.type === "UTENSIL" &&
-              source.availableCount != null &&
-              qty > source.availableCount
-            ) {
-              qty = source.availableCount;
+            if (source.type === "UTENSIL") {
+              const cap = effectiveUtensilAssignable(source, 0);
+              if (cap != null && qty > cap) qty = cap;
             }
             return {
               bookingId,
@@ -697,11 +744,35 @@ async function setEventSupplyItems(req, res) {
       }
     }
 
+    let assignedElsewhereByItem = new Map();
     if (itemType === "UTENSIL") {
+      const assignmentRows = await prisma.bookingEventSupplyItem.groupBy({
+        by: ["supplyItemId"],
+        where: {
+          itemType: "UTENSIL",
+          supplyItemId: { in: ids },
+          bookingEventId: { not: eventId },
+          bookingEvent: {
+            status: { in: ACTIVE_UTENSIL_EVENT_STATUSES },
+            booking: { businessId },
+          },
+        },
+        _sum: { quantity: true },
+      });
+      assignedElsewhereByItem = new Map(
+        assignmentRows.map((row) => [row.supplyItemId, row._sum.quantity ?? 0]),
+      );
+
       for (const row of payload) {
         const source = byId.get(String(row.supply_item_id || "").trim());
         if (!source) continue;
-        const msg = utensilStockExceededMessage(source, row.quantity);
+        const assignedElsewhere =
+          assignedElsewhereByItem.get(source.id) ?? 0;
+        const msg = utensilStockExceededMessage(
+          source,
+          row.quantity,
+          assignedElsewhere,
+        );
         if (msg) return errorResponse(res, msg, 200, "VALIDATION_ERROR");
       }
     }
@@ -718,12 +789,12 @@ async function setEventSupplyItems(req, res) {
               1,
               Math.min(999, parseInt(String(row.quantity), 10) || 1),
             );
-            if (
-              itemType === "UTENSIL" &&
-              source.availableCount != null &&
-              qty > source.availableCount
-            ) {
-              qty = source.availableCount;
+            if (itemType === "UTENSIL") {
+              const cap = effectiveUtensilAssignable(
+                source,
+                assignedElsewhereByItem.get(source.id) ?? 0,
+              );
+              if (cap != null && qty > cap) qty = cap;
             }
             return {
               bookingEventId: eventId,
@@ -741,6 +812,79 @@ async function setEventSupplyItems(req, res) {
     return successResponse(res, "Event supply items updated", { ok: true });
   } catch (e) {
     console.error("setEventSupplyItems:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+function buildSupplySummaryFlags(groupedByType, hasSavedList) {
+  const types = new Set((groupedByType || []).map((g) => g.itemType));
+  const hasIngredients = types.has("INGREDIENT");
+  const hasUtensils = types.has("UTENSIL");
+  return {
+    has_ingredients: hasIngredients,
+    has_utensils: hasUtensils,
+    has_saved_list: hasSavedList,
+    has_supply_items: hasIngredients || hasUtensils || hasSavedList,
+  };
+}
+
+/**
+ * GET .../eventsSupplySummaries — flags for all events on a booking (one round-trip).
+ */
+async function getBookingEventsSupplySummaries(req, res) {
+  try {
+    const businessId = req.businessId;
+    const bookingId = req.params.id;
+
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, businessId },
+      select: {
+        events: { select: { id: true } },
+      },
+    });
+    if (!booking) {
+      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    }
+
+    const eventIds = booking.events.map((e) => e.id);
+    if (eventIds.length === 0) {
+      return successResponse(res, "OK", { summaries: {} });
+    }
+
+    const [grouped, savedLists] = await Promise.all([
+      prisma.bookingEventSupplyItem.groupBy({
+        by: ["bookingEventId", "itemType"],
+        where: { bookingEventId: { in: eventIds } },
+        _count: { _all: true },
+      }),
+      prisma.supplySavedList.findMany({
+        where: { businessId, bookingEventId: { in: eventIds } },
+        select: { bookingEventId: true },
+        distinct: ["bookingEventId"],
+      }),
+    ]);
+
+    const savedSet = new Set(
+      savedLists.map((r) => r.bookingEventId).filter(Boolean),
+    );
+    const byEvent = new Map();
+    for (const row of grouped) {
+      const list = byEvent.get(row.bookingEventId) || [];
+      list.push({ itemType: row.itemType });
+      byEvent.set(row.bookingEventId, list);
+    }
+
+    const summaries = {};
+    for (const eventId of eventIds) {
+      summaries[eventId] = buildSupplySummaryFlags(
+        byEvent.get(eventId) || [],
+        savedSet.has(eventId),
+      );
+    }
+
+    return successResponse(res, "OK", { summaries });
+  } catch (e) {
+    console.error("getBookingEventsSupplySummaries:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
 }
@@ -766,28 +910,23 @@ async function getEventSupplySummary(req, res) {
       return errorResponse(res, "Event not found", 404, "NOT_FOUND");
     }
 
-    const [ingredientCount, utensilCount, savedListCount] = await Promise.all([
-      prisma.bookingEventSupplyItem.count({
-        where: { bookingEventId: eventId, itemType: "INGREDIENT" },
+    const [grouped, savedList] = await Promise.all([
+      prisma.bookingEventSupplyItem.groupBy({
+        by: ["itemType"],
+        where: { bookingEventId: eventId },
+        _count: { _all: true },
       }),
-      prisma.bookingEventSupplyItem.count({
-        where: { bookingEventId: eventId, itemType: "UTENSIL" },
-      }),
-      prisma.supplySavedList.count({
+      prisma.supplySavedList.findFirst({
         where: { businessId, bookingEventId: eventId },
+        select: { id: true },
       }),
     ]);
 
-    const hasIngredients = ingredientCount > 0;
-    const hasUtensils = utensilCount > 0;
-    const hasSavedList = savedListCount > 0;
-
-    return successResponse(res, "OK", {
-      has_ingredients: hasIngredients,
-      has_utensils: hasUtensils,
-      has_saved_list: hasSavedList,
-      has_supply_items: hasIngredients || hasUtensils || hasSavedList,
-    });
+    return successResponse(
+      res,
+      "OK",
+      buildSupplySummaryFlags(grouped, Boolean(savedList)),
+    );
   } catch (e) {
     console.error("getEventSupplySummary:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
@@ -927,10 +1066,37 @@ function normalizeMenuIngredients(raw) {
   return raw;
 }
 
+function ceilSupplyQty(n) {
+  return Math.min(999, Math.max(1, Math.ceil(Number(n) || 1)));
+}
+
+function supplyUnitOptionsForRow(src, preferredUnit) {
+  const pref = String(preferredUnit ?? "").trim();
+  const fromRow = Array.isArray(src?.unitOptions)
+    ? src.unitOptions.map((u) => String(u ?? "").trim()).filter(Boolean)
+    : [];
+  const fallback = pref || src?.defaultUnit || fromRow[0] || "kg";
+  const merged = [...fromRow];
+  if (pref && !merged.includes(pref)) merged.unshift(pref);
+  if (!merged.includes(fallback)) merged.push(fallback);
+  return merged.length ? merged : [fallback];
+}
+
+function buildSuggestedSupplyEventMeta(event, menuItemCount, lineCount) {
+  return {
+    guest_count: event.guestCount ?? null,
+    menu_item_count: menuItemCount,
+    ingredient_line_count: lineCount,
+    function_type: event.functionType ?? null,
+    event_at: event.eventAt ? event.eventAt.toISOString() : null,
+  };
+}
+
 /**
  * GET /v1/bookings/:id/events/:eventId/suggestedSupplyFromMenu
  * Aggregates ingredient lines (with supply_item_id) from MenuItems referenced by the event snapshot,
- * scaled by quantity_per_plate per snapshot row.
+ * scaled by ingredient qty × quantity_per_plate × guest_count (when guests > 0).
+ * Merges saved event ingredient lines when present.
  */
 async function getSuggestedEventSupplyFromMenu(req, res) {
   try {
@@ -958,47 +1124,101 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
 
     const event = await prisma.bookingEvent.findFirst({
       where: { id: eventId, bookingId },
-      select: { id: true, eventSnapshot: true },
+      select: {
+        id: true,
+        eventSnapshot: true,
+        guestCount: true,
+        functionType: true,
+        eventAt: true,
+      },
     });
     if (!event) {
       return errorResponse(res, "Event not found", 404, "NOT_FOUND");
     }
+
+    const eventMetaBase = buildSuggestedSupplyEventMeta(event, 0, 0);
 
     const snap = event.eventSnapshot;
     if (snap == null || typeof snap !== "object") {
       return successResponse(res, "OK", {
         suggestions: [],
         legacy_without_supply: [],
+        event: eventMetaBase,
+        has_saved_ingredients: false,
       });
     }
 
     const menuItems = Array.isArray(snap.menu_items) ? snap.menu_items : [];
+    const guests = Math.max(0, Number(event.guestCount) || 0);
+    const guestMul = guests > 0 ? guests : 1;
+
+    const savedRows = await prisma.bookingEventSupplyItem.findMany({
+      where: { bookingEventId: eventId, itemType: "INGREDIENT" },
+      orderBy: { createdAt: "asc" },
+    });
+    const savedBySupplyId = new Map(
+      savedRows.map((r) => [r.supplyItemId, r]),
+    );
+    const hasSavedIngredients = savedRows.length > 0;
+
     if (menuItems.length === 0) {
+      const savedSupplyIds = savedRows.map((r) => r.supplyItemId);
+      const savedSupplyRows =
+        savedSupplyIds.length > 0
+          ? await prisma.supplyItem.findMany({
+              where: {
+                id: { in: savedSupplyIds },
+                type: "INGREDIENT",
+                isActive: true,
+              },
+            })
+          : [];
+      const savedSupplyById = new Map(savedSupplyRows.map((r) => [r.id, r]));
+      const manualOnly = [];
+      for (const row of savedRows) {
+        const src = savedSupplyById.get(row.supplyItemId);
+        manualOnly.push({
+          supply_item_id: row.supplyItemId,
+          name: resolveLocalizedName(row.nameSnapshot, language),
+          quantity: row.quantity,
+          template_quantity: 0,
+          template_unit: row.unit,
+          unit: row.unit,
+          unit_options: src
+            ? supplyUnitOptionsForRow(src, row.unit)
+            : [row.unit],
+          category_slug: row.categorySlug,
+          from_menu: false,
+        });
+      }
+      manualOnly.sort((a, b) =>
+        String(a.name || "").localeCompare(String(b.name || "")),
+      );
       return successResponse(res, "OK", {
-        suggestions: [],
+        suggestions: manualOnly,
         legacy_without_supply: [],
+        event: buildSuggestedSupplyEventMeta(
+          event,
+          0,
+          manualOnly.length,
+        ),
+        has_saved_ingredients: hasSavedIngredients,
       });
     }
 
-    /** menu_item_id -> total plate count for this event line */
-    const platesByMenuId = new Map();
-    for (const row of menuItems) {
-      const mid = String(row?.id ?? "").trim();
-      if (!mid) continue;
-      const plates = Math.max(
-        1,
-        Math.floor(
-          Number(row?.quantity_per_plate ?? row?.quantity ?? 1) || 1,
-        ),
-      );
-      platesByMenuId.set(mid, (platesByMenuId.get(mid) ?? 0) + plates);
-    }
-
-    const menuIds = [...platesByMenuId.keys()];
+    const menuIds = [
+      ...new Set(
+        menuItems
+          .map((row) => String(row?.id ?? "").trim())
+          .filter(Boolean),
+      ),
+    ];
     if (menuIds.length === 0) {
       return successResponse(res, "OK", {
         suggestions: [],
         legacy_without_supply: [],
+        event: buildSuggestedSupplyEventMeta(event, menuItems.length, 0),
+        has_saved_ingredients: hasSavedIngredients,
       });
     }
 
@@ -1010,13 +1230,23 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
     const visibleMenus = menus.filter((m) =>
       canViewMenuItemForSupply(m, businessId, userId),
     );
+    const menuById = new Map(visibleMenus.map((m) => [m.id, m]));
 
     /** key = supplyItemId + "\t" + unit -> scaled numeric qty */
     const buckets = new Map();
     const legacy = [];
 
-    for (const menu of visibleMenus) {
-      const plates = platesByMenuId.get(menu.id) ?? 1;
+    for (const row of menuItems) {
+      const mid = String(row?.id ?? "").trim();
+      const menu = menuById.get(mid);
+      if (!menu) continue;
+      const qpp = Math.max(
+        1,
+        Math.floor(
+          Number(row?.quantity_per_plate ?? row?.quantity ?? 1) || 1,
+        ),
+      );
+      const plates = qpp * guestMul;
       const ingredients = normalizeMenuIngredients(menu.ingredients);
       for (const ing of ingredients) {
         const sidRaw = ing?.supply_item_id ?? ing?.supplyItemId;
@@ -1043,16 +1273,22 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       }
     }
 
-    const supplyIds = [
+    const supplyIdsFromMenu = [
       ...new Set(
         [...buckets.keys()].map((k) => k.split("\t")[0]).filter(Boolean),
       ),
+    ];
+    const supplyIdsSaved = savedRows.map((r) => r.supplyItemId);
+    const supplyIds = [
+      ...new Set([...supplyIdsFromMenu, ...supplyIdsSaved]),
     ];
 
     if (supplyIds.length === 0) {
       return successResponse(res, "OK", {
         suggestions: [],
         legacy_without_supply: legacy,
+        event: buildSuggestedSupplyEventMeta(event, menuItems.length, 0),
+        has_saved_ingredients: hasSavedIngredients,
       });
     }
 
@@ -1068,6 +1304,8 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
     const supplyById = new Map(supplyRows.map((r) => [r.id, r]));
 
     const suggestions = [];
+    const seenSupplyIds = new Set();
+
     for (const [key, total] of buckets) {
       const [sid, unitFromIng] = key.split("\t");
       const src = supplyById.get(sid);
@@ -1077,14 +1315,44 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
         src.defaultUnit ||
         (src.unitOptions && src.unitOptions[0]) ||
         "kg";
-      const qty = Math.min(999, Math.max(1, Math.ceil(Number(total))));
+      const templateQty = ceilSupplyQty(total);
+      const templateUnit = unit;
+      const saved = savedBySupplyId.get(sid);
       suggestions.push({
         supply_item_id: src.id,
         name: resolveLocalizedName(src.name, language),
-        quantity: qty,
-        unit,
+        template_quantity: templateQty,
+        template_unit: templateUnit,
+        quantity: saved ? saved.quantity : templateQty,
+        unit: saved?.unit || templateUnit,
+        unit_options: supplyUnitOptionsForRow(src, templateUnit),
         category_slug: src.categorySlug,
+        from_menu: true,
       });
+      seenSupplyIds.add(sid);
+    }
+
+    for (const saved of savedRows) {
+      if (seenSupplyIds.has(saved.supplyItemId)) continue;
+      const src = supplyById.get(saved.supplyItemId);
+      if (!src) continue;
+      const defaultUnit =
+        src.defaultUnit ||
+        (src.unitOptions && src.unitOptions[0]) ||
+        saved.unit ||
+        "kg";
+      suggestions.push({
+        supply_item_id: src.id,
+        name: resolveLocalizedName(src.name, language),
+        template_quantity: 0,
+        template_unit: defaultUnit,
+        quantity: saved.quantity,
+        unit: saved.unit,
+        unit_options: supplyUnitOptionsForRow(src, saved.unit),
+        category_slug: src.categorySlug,
+        from_menu: false,
+      });
+      seenSupplyIds.add(saved.supplyItemId);
     }
 
     suggestions.sort((a, b) =>
@@ -1094,6 +1362,12 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
     return successResponse(res, "OK", {
       suggestions,
       legacy_without_supply: legacy,
+      event: buildSuggestedSupplyEventMeta(
+        event,
+        menuItems.length,
+        suggestions.length,
+      ),
+      has_saved_ingredients: hasSavedIngredients,
     });
   } catch (e) {
     console.error("getSuggestedEventSupplyFromMenu:", e);
@@ -1274,6 +1548,252 @@ async function deleteVendor(req, res) {
   }
 }
 
+const ACTIVE_UTENSIL_EVENT_STATUSES = ["PENDING", "CONFIRMED"];
+
+function formatEventAtIso(eventAt) {
+  if (!eventAt) return null;
+  try {
+    return new Date(eventAt).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+function buildUtensilEventTitle(bookingEvent) {
+  const fn = String(bookingEvent?.functionType ?? "").trim();
+  if (fn) return fn;
+  const customer = String(bookingEvent?.booking?.customerName ?? "").trim();
+  if (customer) return customer;
+  const code = String(bookingEvent?.booking?.bookingCode ?? "").trim();
+  if (code) return code;
+  return "Event";
+}
+
+function buildUtensilEventSubtitle(bookingEvent) {
+  const parts = [];
+  const at = formatEventAtIso(bookingEvent?.eventAt);
+  if (at) {
+    parts.push(
+      new Date(at).toLocaleDateString("en-IN", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      }),
+    );
+  }
+  const customer = String(bookingEvent?.booking?.customerName ?? "").trim();
+  if (customer && customer !== buildUtensilEventTitle(bookingEvent)) {
+    parts.push(customer);
+  }
+  return parts.join(" • ") || "—";
+}
+
+function computeUtensilAvailability(total, assigned, damaged) {
+  const a = Math.max(0, Number(assigned) || 0);
+  const d = Math.max(0, Number(damaged) || 0);
+  if (total == null) {
+    return {
+      total: null,
+      assigned: a,
+      damaged: d,
+      free: null,
+      status: a > 0 ? "IN_USE" : d > 0 ? "DAMAGED" : "AVAILABLE",
+    };
+  }
+  const t = Math.max(0, Number(total) || 0);
+  const free = Math.max(0, t - a - d);
+  let status = "AVAILABLE";
+  if (a > 0) status = "IN_USE";
+  else if (d > 0) status = "DAMAGED";
+  return { total: t, assigned: a, damaged: d, free, status };
+}
+
+async function loadActiveUtensilAssignmentMap(businessId, supplyItemIds) {
+  const map = new Map();
+  if (!businessId || !Array.isArray(supplyItemIds) || supplyItemIds.length === 0) {
+    return map;
+  }
+  const rows = await prisma.bookingEventSupplyItem.findMany({
+    where: {
+      itemType: "UTENSIL",
+      supplyItemId: { in: supplyItemIds },
+      bookingEvent: {
+        status: { in: ACTIVE_UTENSIL_EVENT_STATUSES },
+        booking: { businessId },
+      },
+    },
+    select: {
+      supplyItemId: true,
+      quantity: true,
+      unit: true,
+      bookingEventId: true,
+      bookingEvent: {
+        select: {
+          id: true,
+          eventAt: true,
+          functionType: true,
+          booking: {
+            select: {
+              id: true,
+              customerName: true,
+              bookingCode: true,
+            },
+          },
+        },
+      },
+    },
+    orderBy: [{ bookingEvent: { eventAt: "asc" } }],
+  });
+
+  for (const row of rows) {
+    const id = row.supplyItemId;
+    if (!map.has(id)) {
+      map.set(id, { assigned: 0, events: [] });
+    }
+    const entry = map.get(id);
+    const qty = Math.max(0, parseInt(String(row.quantity), 10) || 0);
+    entry.assigned += qty;
+    entry.events.push({
+      event_id: row.bookingEventId,
+      booking_id: row.bookingEvent?.booking?.id ?? null,
+      title: buildUtensilEventTitle(row.bookingEvent),
+      subtitle: buildUtensilEventSubtitle(row.bookingEvent),
+      event_at: formatEventAtIso(row.bookingEvent?.eventAt),
+      quantity: qty,
+      unit: row.unit,
+    });
+  }
+  return map;
+}
+
+function serializeUtensilInventoryRow(row, assignmentEntry, lang) {
+  const base = serializeSupplyItem(row, lang);
+  const availability = computeUtensilAvailability(
+    row.availableCount,
+    assignmentEntry?.assigned ?? 0,
+    row.damagedCount ?? 0,
+  );
+  return {
+    ...base,
+    total: availability.total,
+    assigned: availability.assigned,
+    damaged: availability.damaged,
+    free: availability.free,
+    status: availability.status,
+    assigned_events: assignmentEntry?.events ?? [],
+  };
+}
+
+/** GET /v1/utensilsInventory — catalog + computed in-use / free stock. */
+async function getUtensilsInventory(req, res) {
+  try {
+    const businessId = req.businessId;
+    const userId = req.user?.userId;
+    const language = getRequestedLanguage(req);
+    const q = String(req.query.q ?? "").trim();
+    const qLower = q.toLowerCase();
+    const statusFilter = String(req.query.status ?? "all").trim().toLowerCase();
+
+    const visibilityWhere = {
+      AND: [
+        { OR: supplyVisibilityOrBranches(businessId, userId) },
+        { isActive: true },
+        { type: "UTENSIL" },
+      ],
+    };
+
+    let rows = await prisma.supplyItem.findMany({
+      where: visibilityWhere,
+      orderBy: { createdAt: "desc" },
+      include: { category: true },
+    });
+
+    if (q) {
+      rows = rows.filter((row) => nameMatchesSearch(row, qLower));
+    }
+
+    const assignmentMap = await loadActiveUtensilAssignmentMap(
+      businessId,
+      rows.map((row) => row.id),
+    );
+
+    let items = rows.map((row) =>
+      serializeUtensilInventoryRow(row, assignmentMap.get(row.id), language),
+    );
+
+    if (statusFilter === "available") {
+      items = items.filter(
+        (row) => row.status === "AVAILABLE" && (row.free == null || row.free > 0),
+      );
+    } else if (statusFilter === "in_use") {
+      items = items.filter((row) => row.assigned > 0);
+    } else if (statusFilter === "damaged") {
+      items = items.filter((row) => row.damaged > 0);
+    }
+
+    let totalUnits = 0;
+    let assignedUnits = 0;
+    let freeUnits = 0;
+    let damagedUnits = 0;
+    for (const row of items) {
+      if (row.total != null) {
+        totalUnits += row.total;
+        assignedUnits += row.assigned;
+        freeUnits += row.free ?? 0;
+        damagedUnits += row.damaged ?? 0;
+      }
+    }
+
+    return successResponse(res, "OK", {
+      summary: {
+        total_items: items.length,
+        total_units: totalUnits,
+        assigned_units: assignedUnits,
+        free_units: freeUnits,
+        damaged_units: damagedUnits,
+      },
+      items,
+    });
+  } catch (e) {
+    console.error("getUtensilsInventory:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+/** GET /v1/utensilsInventory/:id — single utensil + assigned events. */
+async function getUtensilInventoryDetail(req, res) {
+  try {
+    const businessId = req.businessId;
+    const userId = req.user?.userId;
+    const language = getRequestedLanguage(req);
+    const id = String(req.params.id || "").trim();
+    if (!id) return errorResponse(res, "id is required", 200, "VALIDATION_ERROR");
+
+    const row = await prisma.supplyItem.findFirst({
+      where: {
+        id,
+        type: "UTENSIL",
+        isActive: true,
+        OR: supplyVisibilityOrBranches(businessId, userId),
+      },
+      include: { category: true },
+    });
+    if (!row) return errorResponse(res, "Utensil not found", 404, "NOT_FOUND");
+
+    const assignmentMap = await loadActiveUtensilAssignmentMap(businessId, [row.id]);
+    const item = serializeUtensilInventoryRow(
+      row,
+      assignmentMap.get(row.id),
+      language,
+    );
+
+    return successResponse(res, "OK", { item });
+  } catch (e) {
+    console.error("getUtensilInventoryDetail:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
 /**
  * POST /v1/generateSupplyListPdf
  * Body: { document_label, heading, subtitle?, company_name?, table_labels: { item, qty, unit }, groups: [{ title, lines: [{ name, quantity, unit }] }] }
@@ -1327,11 +1847,14 @@ module.exports = {
   deleteSupplyUnit,
   updateSupplyItem,
   deleteSupplyItem,
+  getUtensilsInventory,
+  getUtensilInventoryDetail,
   setBookingSupplyItems,
   getBookingSupplyItems,
   setEventSupplyItems,
   getEventSupplyItems,
   getEventSupplySummary,
+  getBookingEventsSupplySummaries,
   getSuggestedEventSupplyFromMenu,
   createVendor,
   listVendors,

@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model ServiceType {
@@ -145,7 +146,77 @@ model User {
   menuItemsCreated  MenuItem[]
   supplyItemsCreated SupplyItem[]
   supplySavedListsCreated SupplySavedList[] @relation("SupplySavedListCreator")
+  extraServicesCreated ExtraService[]
   contactMessages   ContactMessage[]
+  accessCodesAssigned AccessCode[] @relation("AccessCodeAssignedUser")
+  notificationLogsCreated NotificationLog[] @relation("NotificationLogCreator")
+}
+
+/// Admin-generated subscription access codes (6-digit) for caterer onboarding.
+model AccessCode {
+  id             String    @id @default(uuid())
+  code           String    @unique
+  planType       String
+  status         String    @default("unused")
+  assignedUserId String?
+  assignedUser   User?     @relation("AccessCodeAssignedUser", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  usedAt         DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([status])
+  @@index([planType])
+  @@index([assignedUserId])
+}
+
+/// Admin broadcast notifications — log of title/message and audience size.
+model NotificationLog {
+  id              String   @id @default(uuid())
+  title           String
+  message         String   @db.Text
+  sentTo          String   @default("all-users")
+  sentCount       Int      @default(0)
+  tokensCount     Int      @default(0)
+  createdByUserId String?
+  createdBy       User?    @relation("NotificationLogCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+}
+
+/// Admin audit trail (login, codes, payments, etc.).
+model ActivityLog {
+  id          String   @id @default(uuid())
+  type        String
+  message     String   @db.Text
+  meta        Json?
+  actorUserId String?
+  createdAt   DateTime @default(now())
+
+  @@index([type])
+  @@index([createdAt(sort: Desc)])
+}
+
+/// Singleton global settings (admin-managed).
+model AppSettings {
+  id           String   @id @default("default")
+  appName      String   @default("Katmitra")
+  supportEmail String   @default("support@katmitra.com")
+  paymentUpi   String   @default("")
+  paymentBank  String   @default("") @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+/// Per-platform mobile app version gates (admin-managed; env vars are fallback).
+model AppVersionConfig {
+  id             String   @id @default(uuid())
+  platform       String   @unique
+  latestVersion  String
+  minimumVersion String
+  updateMessage  String   @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 }
 
 model ContactMessage {
@@ -154,11 +225,14 @@ model ContactMessage {
   customerName String
   phone        String?
   description  String
+  status       String   @default("open")
   userId       String?
   user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
   createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   @@index([createdAt])
+  @@index([status])
 }
 
 model UserDevice {
@@ -350,6 +424,7 @@ model BookingEvent {
   eventAt      DateTime?
   eventLocation String?
   functionType String?
+  jamanvarType String?
   guestCount   Int?
   notes        String?     @db.Text
   status       EventStatus @default(PENDING)
@@ -402,6 +477,7 @@ model SupplyItem {
   unitOptions    String[] @default([])
   defaultUnit    String
   availableCount Int?
+  damagedCount   Int      @default(0)
   photoUrl       String?
   isActive       Boolean @default(true)
   createdAt      DateTime @default(now())
@@ -497,12 +573,15 @@ model Dish {
   parentDishId  String?
   parentDish    Dish?    @relation("DishLineage", fields: [parentDishId], references: [id])
   childDishes   Dish[]   @relation("DishLineage")
-  menuItems     DishMenuItem[]
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  menuItems           DishMenuItem[]
+  requiredIngredients           Json     @default("[]") // dish-level totals; does not modify MenuItem.ingredients
+  requiredIngredientsCustomized Boolean  @default(false)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 
   @@index([businessId])
   @@index([parentDishId])
+  @@index([businessId, isTemplate, updatedAt(sort: Desc)])
 }
 
 model DishMenuItem {
@@ -660,20 +739,26 @@ model EventStaff {
 }
 
 model ExtraService {
-  id           String                  @id @default(uuid())
-  businessId   String
-  business     Business                @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  title        String
-  description  String?                 @db.Text
-  pricingType  ExtraServicePricingType
-  price        Decimal                 @db.Decimal(12, 2)
-  isOptional   Boolean                 @default(true)
-  isActive     Boolean                 @default(true)
-  createdAt    DateTime                @default(now())
-  updatedAt    DateTime                @updatedAt
-  bookingLines BookingExtraServiceLine[]
+  id              String                  @id @default(uuid())
+  businessId      String?
+  business        Business?               @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdByUserId String?
+  createdBy       User?                   @relation(fields: [createdByUserId], references: [id])
+  /// false only when both businessId and createdByUserId are set; otherwise true (catalog / admin).
+  isGlobal        Boolean                 @default(false)
+  title           String
+  description     String?                 @db.Text
+  pricingType     ExtraServicePricingType
+  price           Decimal                 @db.Decimal(12, 2)
+  isOptional      Boolean                 @default(true)
+  isActive        Boolean                 @default(true)
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
+  bookingLines    BookingExtraServiceLine[]
 
   @@index([businessId, isActive])
+  @@index([createdByUserId])
+  @@index([isGlobal])
 }
 
 model BookingExtraServiceLine {

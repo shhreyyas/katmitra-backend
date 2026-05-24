@@ -12,11 +12,14 @@ const {
   deleteSupplyUnit,
   updateSupplyItem,
   deleteSupplyItem,
+  getUtensilsInventory,
+  getUtensilInventoryDetail,
   setBookingSupplyItems,
   getBookingSupplyItems,
   setEventSupplyItems,
   getEventSupplyItems,
   getEventSupplySummary,
+  getBookingEventsSupplySummaries,
   getSuggestedEventSupplyFromMenu,
   createVendor,
   listVendors,
@@ -91,6 +94,18 @@ router.delete(
   businessContextMiddleware,
   deleteSupplyItem,
 );
+router.get(
+  "/v1/utensilsInventory",
+  authMiddleware,
+  businessContextMiddleware,
+  getUtensilsInventory,
+);
+router.get(
+  "/v1/utensilsInventory/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  getUtensilInventoryDetail,
+);
 
 router.post(
   "/v1/bookings/:id/setSupplyItems",
@@ -103,6 +118,12 @@ router.get(
   authMiddleware,
   businessContextMiddleware,
   getBookingSupplyItems,
+);
+router.get(
+  "/v1/bookings/:id/eventsSupplySummaries",
+  authMiddleware,
+  businessContextMiddleware,
+  getBookingEventsSupplySummaries,
 );
 
 router.post(

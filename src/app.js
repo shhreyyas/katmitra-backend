@@ -59,6 +59,9 @@ app.use("/api", staffRoutes);
 const extraServiceRoutes = require("./routes/extraServiceRoutes");
 app.use("/api", extraServiceRoutes);
 
+const adminRoutes = require("./routes/adminRoutes");
+app.use("/api", adminRoutes);
+
 // Test Route
 app.get("/", (req, res) => {
   res.send("Catering API Running");
