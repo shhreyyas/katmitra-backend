@@ -1,20 +1,22 @@
-const dns = require("dns");
-const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
 
-dns.setDefaultResultOrder("ipv4first");
+// ─── Resend HTTP API transport ────────────────────────────────────────────────
+// Gmail SMTP (ports 465 / 587) is blocked on Railway's infrastructure at the
+// network level — no code workaround is possible. Resend uses HTTPS (port 443)
+// which is always open, avoiding both the port-block and the IPv6/ENETUNREACH
+// issues that plagued the previous nodemailer setup.
+//
+// Required Railway env vars:
+//   RESEND_API_KEY   — from resend.com dashboard
+//   RESEND_FROM_EMAIL — verified sender address  e.g. noreply@yourdomain.com
+//                       Falls back to EMAIL_USER for local dev.
+// ──────────────────────────────────────────────────────────────────────────────
+const resend = new Resend(process.env.RESEND_API_KEY);
 
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
-  connectionTimeout: 20000,
-  socketTimeout: 30000,
-  greetingTimeout: 15000,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+const FROM_EMAIL =
+  process.env.RESEND_FROM_EMAIL ||
+  process.env.EMAIL_USER ||
+  "noreply@katmitra.com";
 
 exports.sendOtpEmail = async (toEmail, otp, type = "signup") => {
   let subject = "";
@@ -104,12 +106,13 @@ exports.sendOtpEmail = async (toEmail, otp, type = "signup") => {
   </html>
   `;
 
-  await transporter.sendMail({
-    from: `"Catering App" <${process.env.EMAIL_USER}>`,
+  const { error } = await resend.emails.send({
+    from: `Catering App <${FROM_EMAIL}>`,
     to: toEmail,
     subject,
     html: htmlTemplate,
   });
+  if (error) throw new Error(error.message);
 };
 
 /**
@@ -175,12 +178,13 @@ exports.sendBookingConfirmationEmail = async (toEmail, opts) => {
   </html>
   `;
 
-  await transporter.sendMail({
-    from: `"Catering App" <${process.env.EMAIL_USER}>`,
+  const { error } = await resend.emails.send({
+    from: `Catering App <${FROM_EMAIL}>`,
     to: toEmail,
     subject,
     html: htmlTemplate,
   });
+  if (error) throw new Error(error.message);
 };
 
 /**
@@ -239,10 +243,11 @@ exports.sendContactInquiryEmail = async ({ toEmail, inquiry }) => {
   </html>
   `;
 
-  await transporter.sendMail({
-    from: `"KatMitra Website" <${process.env.EMAIL_USER}>`,
+  const { error } = await resend.emails.send({
+    from: `KatMitra Website <${FROM_EMAIL}>`,
     to: toEmail,
     subject,
     html: htmlTemplate,
   });
+  if (error) throw new Error(error.message);
 };
