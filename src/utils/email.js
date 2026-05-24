@@ -1,22 +1,28 @@
 const { Resend } = require("resend");
 
-// ─── Resend HTTP API transport ────────────────────────────────────────────────
-// Gmail SMTP (ports 465 / 587) is blocked on Railway's infrastructure at the
-// network level — no code workaround is possible. Resend uses HTTPS (port 443)
-// which is always open, avoiding both the port-block and the IPv6/ENETUNREACH
-// issues that plagued the previous nodemailer setup.
+// ─── Resend HTTP API ──────────────────────────────────────────────────────────
+// Uses HTTPS (port 443) — works on Railway where SMTP ports 465/587 are blocked.
+// Free tier: 3,000 emails/month, no credit card required.
 //
-// Required Railway env vars:
-//   RESEND_API_KEY   — from resend.com dashboard
-//   RESEND_FROM_EMAIL — verified sender address  e.g. noreply@yourdomain.com
-//                       Falls back to EMAIL_USER for local dev.
+// Required env vars:
+//   RESEND_API_KEY     — from resend.com dashboard (already set)
+//   RESEND_FROM_EMAIL  — must be an address on your verified Resend domain
+//                        e.g.  noreply@katmitra.com
 // ──────────────────────────────────────────────────────────────────────────────
 const resend = new Resend(process.env.RESEND_API_KEY);
+const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev";
 
-const FROM_EMAIL =
-  process.env.RESEND_FROM_EMAIL ||
-  process.env.EMAIL_USER ||
-  "noreply@katmitra.com";
+async function sendEmail({ fromLabel, to, subject, html }) {
+  const { error } = await resend.emails.send({
+    from: `${fromLabel} <${FROM_EMAIL}>`,
+    to,
+    subject,
+    html,
+  });
+  if (error) throw new Error(`Resend error: ${error.message}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 exports.sendOtpEmail = async (toEmail, otp, type = "signup") => {
   let subject = "";
@@ -35,7 +41,7 @@ exports.sendOtpEmail = async (toEmail, otp, type = "signup") => {
       "We received a request to reset your password. Use the OTP below to proceed.";
   }
 
-  const htmlTemplate = `
+  const html = `
   <!DOCTYPE html>
   <html lang="en">
   <head>
@@ -48,7 +54,7 @@ exports.sendOtpEmail = async (toEmail, otp, type = "signup") => {
       <tr>
         <td align="center">
           <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:10px; overflow:hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.1);">
-            
+
             <!-- Header -->
             <tr>
               <td style="background: linear-gradient(135deg, #FF6B35, #F7931E); padding: 40px 30px; text-align:center;">
@@ -103,16 +109,9 @@ exports.sendOtpEmail = async (toEmail, otp, type = "signup") => {
       </tr>
     </table>
   </body>
-  </html>
-  `;
+  </html>`;
 
-  const { error } = await resend.emails.send({
-    from: `Catering App <${FROM_EMAIL}>`,
-    to: toEmail,
-    subject,
-    html: htmlTemplate,
-  });
-  if (error) throw new Error(error.message);
+  await sendEmail({ fromLabel: "Catering App", to: toEmail, subject, html });
 };
 
 /**
@@ -125,16 +124,14 @@ exports.sendBookingConfirmationEmail = async (toEmail, opts) => {
   if (opts.eventAt) {
     try {
       const d = new Date(opts.eventAt);
-      when = d.toLocaleString("en-IN", {
-        dateStyle: "medium",
-        timeStyle: "short",
-      });
+      when = d.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
     } catch {
       when = String(opts.eventAt);
     }
   }
+
   const subject = `Booking confirmed — ${code}`;
-  const htmlTemplate = `
+  const html = `
   <!DOCTYPE html>
   <html lang="en">
   <head>
@@ -175,16 +172,9 @@ exports.sendBookingConfirmationEmail = async (toEmail, opts) => {
       </tr>
     </table>
   </body>
-  </html>
-  `;
+  </html>`;
 
-  const { error } = await resend.emails.send({
-    from: `Catering App <${FROM_EMAIL}>`,
-    to: toEmail,
-    subject,
-    html: htmlTemplate,
-  });
-  if (error) throw new Error(error.message);
+  await sendEmail({ fromLabel: "Catering App", to: toEmail, subject, html });
 };
 
 /**
@@ -192,17 +182,11 @@ exports.sendBookingConfirmationEmail = async (toEmail, opts) => {
  */
 exports.sendContactInquiryEmail = async ({ toEmail, inquiry }) => {
   const submittedAt = inquiry.createdAt
-    ? new Date(inquiry.createdAt).toLocaleString("en-IN", {
-        dateStyle: "medium",
-        timeStyle: "short",
-      })
-    : new Date().toLocaleString("en-IN", {
-        dateStyle: "medium",
-        timeStyle: "short",
-      });
+    ? new Date(inquiry.createdAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })
+    : new Date().toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 
   const subject = `New Contact Inquiry - ${inquiry.customerName}`;
-  const htmlTemplate = `
+  const html = `
   <!DOCTYPE html>
   <html lang="en">
   <head>
@@ -240,14 +224,7 @@ exports.sendContactInquiryEmail = async ({ toEmail, inquiry }) => {
       </tr>
     </table>
   </body>
-  </html>
-  `;
+  </html>`;
 
-  const { error } = await resend.emails.send({
-    from: `KatMitra Website <${FROM_EMAIL}>`,
-    to: toEmail,
-    subject,
-    html: htmlTemplate,
-  });
-  if (error) throw new Error(error.message);
+  await sendEmail({ fromLabel: "KatMitra Website", to: toEmail, subject, html });
 };
