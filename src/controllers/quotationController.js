@@ -418,4 +418,5 @@ module.exports = {
   getQuotation,
   updateQuotation,
   deleteQuotation,
+  serializeQuotation,
 };

@@ -10,39 +10,42 @@ module.exports = async (req, res, next) => {
   const userId = req.user?.userId;
   const headerRaw = req.headers["x-business-id"];
 
-  let resolvedBusinessId = null;
+  try {
+    let resolvedBusinessId = null;
+    if (headerRaw && typeof headerRaw === "string" && headerRaw.trim()) {
+      resolvedBusinessId = headerRaw.trim();
+    } else {
+      resolvedBusinessId = req.user?.businessId ?? null;
+    }
 
-  if (headerRaw && typeof headerRaw === "string" && headerRaw.trim()) {
-    resolvedBusinessId = headerRaw.trim();
-  } else {
-    resolvedBusinessId = req.user?.businessId ?? null;
-    if (!resolvedBusinessId) {
-      try {
-        const u = await prisma.user.findUnique({
-          where: { id: userId },
-          select: { businessId: true },
-        });
-        resolvedBusinessId = u?.businessId ?? null;
-      } catch (e) {
-        console.error("businessContextMiddleware user lookup:", e.message);
-        return errorResponse(res, "Server error", 500, "SERVER_ERROR");
+    let userBusinessId = req.user?.businessId ?? null;
+    const needsUserLookup =
+      !resolvedBusinessId || resolvedBusinessId !== userBusinessId;
+
+    if (needsUserLookup) {
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { businessId: true },
+      });
+      userBusinessId = user?.businessId ?? null;
+      if (!resolvedBusinessId) {
+        resolvedBusinessId = userBusinessId;
       }
     }
-  }
 
-  if (!resolvedBusinessId) {
-    return errorResponse(
-      res,
-      "No business context",
-      422,
-      "VALIDATION_ERROR",
-      "Register a business first, or pass x-business-id when you have multiple businesses.",
-    );
-  }
+    if (!resolvedBusinessId) {
+      return errorResponse(
+        res,
+        "No business context",
+        422,
+        "VALIDATION_ERROR",
+        "Register a business first, or pass x-business-id when you have multiple businesses.",
+      );
+    }
 
-  try {
     const business = await prisma.business.findUnique({
       where: { id: resolvedBusinessId },
+      select: { id: true, createdByUserId: true },
     });
 
     if (!business) {
@@ -55,13 +58,9 @@ module.exports = async (req, res, next) => {
       );
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-    });
-
     const allowed =
       business.createdByUserId === userId ||
-      user?.businessId === resolvedBusinessId;
+      userBusinessId === resolvedBusinessId;
 
     if (!allowed) {
       return errorResponse(

@@ -62,11 +62,14 @@ function computePricingFromSnapshots(rows, guestCount, discount, servicePct, tax
     return s + num(r.pricePerPlateSnapshot) * q;
   }, 0);
   const subtotal = perPlateTotal * guests;
-  const serviceChargeAmount = subtotal * (servicePct / 100);
-  // Tax on food + service (aligned with app getBookingPricingBreakdown)
-  const taxAmount = (subtotal + serviceChargeAmount) * (taxPct / 100);
-  const disc = Math.max(0, num(discount));
-  const totalDue = Math.max(0, subtotal + serviceChargeAmount + taxAmount - disc);
+  const serviceChargeAmount = Math.round(subtotal * (servicePct / 100));
+  // Tax on subtotal only (aligned with app getBookingPricingBreakdown)
+  const taxAmount = Math.round(subtotal * (taxPct / 100));
+  const disc = Math.round(Math.max(0, num(discount)));
+  const totalDue = Math.max(
+    0,
+    Math.round(subtotal + serviceChargeAmount + taxAmount - disc),
+  );
   return {
     perPlateTotal,
     subtotal,
@@ -169,6 +172,7 @@ const CONFIRMED_LIMITED_PATCH_EVENT_KEYS = new Set([
   "event_at",
   "event_location",
   "function_type",
+  "jamanvar_type",
   "guest_count",
   "notes",
   "status",
@@ -234,13 +238,42 @@ function resolveTotalDueForPayment(booking) {
   return stored;
 }
 
+const JAMANVAR_SLUGS = new Set([
+  "morningbreakfast",
+  "lunch",
+  "dinner",
+  "eveningnasto",
+]);
+
+function isStoredJamanvarSlug(v) {
+  if (!v || typeof v !== "string") return false;
+  return JAMANVAR_SLUGS.has(v.toLowerCase().replace(/[^a-z]/g, ""));
+}
+
+function resolveEventJamanvarType(ev) {
+  if (ev.jamanvarType) return ev.jamanvarType;
+  if (isStoredJamanvarSlug(ev.functionType)) return ev.functionType;
+  return null;
+}
+
+function jamanvarTypeFromEventBody(ev, current) {
+  if (ev.jamanvar_type !== undefined) {
+    return ev.jamanvar_type != null ? String(ev.jamanvar_type).trim() : null;
+  }
+  if (ev.function_type !== undefined && isStoredJamanvarSlug(ev.function_type)) {
+    return String(ev.function_type).trim();
+  }
+  return current?.jamanvarType ?? null;
+}
+
 function serializeBookingEvent(ev) {
   return {
     id: ev.id,
     booking_id: ev.bookingId,
     event_at: ev.eventAt?.toISOString?.() ?? ev.eventAt ?? null,
     event_location: ev.eventLocation ?? null,
-    function_type: ev.functionType ?? null,
+    jamanvar_type: resolveEventJamanvarType(ev),
+    function_type: null,
     guest_count: ev.guestCount ?? null,
     notes: ev.notes ?? null,
     status: ev.status ?? "PENDING",
@@ -368,7 +401,6 @@ function serializeBooking(b, { includePayments = true } = {}) {
         event_location: first.event_location ?? b.eventLocation ?? null,
         guest_count: first.guest_count ?? b.guestCount ?? null,
         event_at: first.event_at ?? bookingAtIso,
-        function_type: first.function_type ?? b.functionType ?? null,
       },
       ...serializedEvents.slice(1),
     ];
@@ -378,7 +410,7 @@ function serializeBooking(b, { includePayments = true } = {}) {
   const rootAt = firstEvent?.event_at ?? bookingAtIso;
   const rootLoc = firstEvent?.event_location ?? b.eventLocation ?? null;
   const rootGuests = firstEvent?.guest_count ?? b.guestCount ?? null;
-  const rootFn = firstEvent?.function_type ?? b.functionType ?? null;
+  const rootFn = b.functionType ?? null;
 
   const extraServiceLines = (b.extraServiceLines || []).map((line) => ({
     id: line.id,
@@ -561,7 +593,13 @@ async function createBooking(req, res) {
           bookingId: booking.id,
           eventAt: ev.event_at ? new Date(ev.event_at) : null,
           eventLocation: ev.event_location ?? null,
-          functionType: ev.function_type ?? null,
+          functionType: null,
+          jamanvarType:
+            ev.jamanvar_type !== undefined && ev.jamanvar_type != null
+              ? String(ev.jamanvar_type).trim()
+              : ev.function_type != null && isStoredJamanvarSlug(ev.function_type)
+                ? String(ev.function_type).trim()
+                : null,
           guestCount: ev.guest_count != null ? parseInt(ev.guest_count, 10) : null,
           notes: ev.notes ?? null,
           status: ev.status ?? "PENDING",
@@ -626,7 +664,10 @@ async function patchBooking(req, res) {
     const firstEvent =
       Array.isArray(body.events) && body.events.length > 0 ? body.events[0] : null;
     const nextEventAt = firstEvent?.event_at ?? body.event_at;
-    const nextEventLocation = firstEvent?.event_location ?? body.event_location;
+    const nextEventLocation =
+      body.event_location !== undefined
+        ? body.event_location
+        : firstEvent?.event_location ?? undefined;
     const nextFunctionType = firstEvent?.function_type ?? body.function_type;
     const nextGuestCount = firstEvent?.guest_count ?? body.guest_count;
     const nextNotes = firstEvent?.notes ?? body.notes;
@@ -805,8 +846,8 @@ async function patchBooking(req, res) {
                 : exists.eventAt,
             eventLocation:
               ev.event_location !== undefined ? ev.event_location : exists.eventLocation,
-            functionType:
-              ev.function_type !== undefined ? ev.function_type : exists.functionType,
+            functionType: null,
+            jamanvarType: jamanvarTypeFromEventBody(ev, exists),
             guestCount:
               ev.guest_count !== undefined
                 ? ev.guest_count != null
@@ -849,6 +890,7 @@ async function patchBooking(req, res) {
             eventAt: true,
             eventLocation: true,
             functionType: true,
+            jamanvarType: true,
             guestCount: true,
             notes: true,
             status: true,
@@ -873,8 +915,8 @@ async function patchBooking(req, res) {
                     : current.eventAt,
                 eventLocation:
                   ev.event_location !== undefined ? ev.event_location : current.eventLocation,
-                functionType:
-                  ev.function_type !== undefined ? ev.function_type : current.functionType,
+                functionType: null,
+                jamanvarType: jamanvarTypeFromEventBody(ev, current),
                 guestCount:
                   ev.guest_count !== undefined
                     ? (ev.guest_count != null ? parseInt(ev.guest_count, 10) : null)
@@ -896,7 +938,8 @@ async function patchBooking(req, res) {
             : {
                 eventAt: ev.event_at ? new Date(ev.event_at) : null,
                 eventLocation: ev.event_location ?? null,
-                functionType: ev.function_type ?? null,
+                functionType: null,
+                jamanvarType: jamanvarTypeFromEventBody(ev, null),
                 guestCount: ev.guest_count != null ? parseInt(ev.guest_count, 10) : null,
                 notes: ev.notes ?? null,
                 status: ev.status ?? "PENDING",
@@ -932,6 +975,15 @@ async function patchBooking(req, res) {
             ...(keepIds.length ? { id: { notIn: keepIds } } : {}),
           },
         });
+      });
+    }
+
+    if (body.event_location !== undefined) {
+      const loc =
+        body.event_location != null ? String(body.event_location).trim() : "";
+      await prisma.bookingEvent.updateMany({
+        where: { bookingId },
+        data: { eventLocation: loc || null },
       });
     }
 
@@ -1104,8 +1156,8 @@ async function updateEvent(req, res) {
           body.event_at !== undefined ? (body.event_at ? new Date(body.event_at) : null) : current.eventAt,
         eventLocation:
           body.event_location !== undefined ? body.event_location : current.eventLocation,
-        functionType:
-          body.function_type !== undefined ? body.function_type : current.functionType,
+        functionType: null,
+        jamanvarType: jamanvarTypeFromEventBody(body, current),
         guestCount:
           body.guest_count !== undefined
             ? (body.guest_count != null ? parseInt(body.guest_count, 10) : null)
@@ -1189,7 +1241,8 @@ async function createEvent(req, res) {
         bookingId,
         eventAt: body.event_at ? new Date(body.event_at) : null,
         eventLocation: body.event_location ?? null,
-        functionType: body.function_type ?? null,
+        functionType: null,
+        jamanvarType: jamanvarTypeFromEventBody(body, null),
         guestCount: body.guest_count != null ? parseInt(body.guest_count, 10) : null,
         notes: body.notes ?? null,
         status: body.status ?? "PENDING",
@@ -1315,6 +1368,7 @@ async function getDashboard(req, res) {
         take: 500,
         include: {
           menuItems: true,
+          extraServiceLines: true,
           events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
           payments: { orderBy: { createdAt: "desc" }, take: 5 },
         },
@@ -1422,6 +1476,7 @@ async function searchBookingCustomers(req, res) {
         customerName: true,
         customerPhone: true,
         customerEmail: true,
+        eventLocation: true,
         updatedAt: true,
       },
       orderBy: { updatedAt: "desc" },
@@ -1434,6 +1489,7 @@ async function searchBookingCustomers(req, res) {
       const name = String(row.customerName ?? "").trim();
       const phone = String(row.customerPhone ?? "").trim();
       const email = String(row.customerEmail ?? "").trim();
+      const location = String(row.eventLocation ?? "").trim();
       if (!name && !phone) continue;
       const key = phone
         ? `p:${phone}`
@@ -1444,6 +1500,7 @@ async function searchBookingCustomers(req, res) {
         customer_name: name || null,
         customer_phone: phone || null,
         customer_email: email || null,
+        event_location: location || null,
       });
       if (customers.length >= take) break;
     }
@@ -1570,6 +1627,7 @@ async function listBookings(req, res) {
         skip,
         include: {
           menuItems: true,
+          extraServiceLines: true,
           events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
           payments: { orderBy: { createdAt: "desc" }, take: 5 },
         },
@@ -1732,6 +1790,57 @@ async function deleteBooking(req, res) {
 }
 
 /**
+ * POST /v1/bookings/:id/cancel — marks a confirmed booking as cancelled.
+ */
+async function cancelBooking(req, res) {
+  try {
+    const businessId = req.businessId;
+    const bookingId = req.params.id;
+
+    const existing = await loadBookingForBusiness(bookingId, businessId, {
+      includePayments: true,
+    });
+    if (!existing) {
+      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    }
+    if (existing.status === "CANCELLED") {
+      return errorResponse(res, "Booking is already cancelled", 200, "VALIDATION_ERROR");
+    }
+    if (existing.status !== "CONFIRMED") {
+      return errorResponse(
+        res,
+        "Only confirmed bookings can be cancelled",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+    if (existing.completedAt) {
+      return errorResponse(
+        res,
+        "Completed orders cannot be cancelled",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const updated = await prisma.booking.update({
+      where: { id: bookingId },
+      data: { status: "CANCELLED" },
+      include: {
+        menuItems: true,
+        events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
+        payments: { orderBy: { createdAt: "desc" } },
+      },
+    });
+    const enriched = await enrichEventSnapshotMenuImages(updated);
+    return successResponse(res, "Booking cancelled", serializeBooking(enriched));
+  } catch (e) {
+    console.error("cancelBooking:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+/**
  * POST /v1/bookings/:id/confirm
  */
 async function confirmBooking(req, res) {
@@ -1829,6 +1938,7 @@ async function recordPayment(req, res) {
     const existing = await prisma.booking.findFirst({
       where: { id: bookingId, businessId },
       include: {
+        extraServiceLines: true,
         events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
       },
     });
@@ -1841,14 +1951,14 @@ async function recordPayment(req, res) {
 
     const totalDue = resolveTotalDueForPayment(existing);
     const already = num(existing.amountPaid);
-    const remaining = Math.max(0, totalDue - already);
+    const remaining = Math.max(0, Math.round(totalDue - already));
     if (amount > remaining + 0.01) {
       return errorResponse(
         res,
         "Amount exceeds remaining balance",
         200,
         "VALIDATION_ERROR",
-        `Maximum payable: ${remaining.toFixed(2)}`,
+        `Maximum payable: ${remaining}`,
       );
     }
 
@@ -1942,6 +2052,7 @@ module.exports = {
   getBooking,
   completeBookingOrder,
   deleteBooking,
+  cancelBooking,
   confirmBooking,
   recordPayment,
   triggerBookingPdfJobs,
@@ -1949,4 +2060,5 @@ module.exports = {
   computePricingFromSnapshots,
   canEditMenuBeforeEvent,
   canEditCustomerDetailsBeforeEvent,
+  serializeBooking,
 };

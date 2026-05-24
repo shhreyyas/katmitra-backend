@@ -3,6 +3,7 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { successResponse, errorResponse } = require("../utils/response");
 const { sendOtpEmail } = require("../utils/email");
+const { logActivity } = require("../utils/activityLog");
 const {
   formatUserResponse,
   validatePdfPrefix,
@@ -426,6 +427,14 @@ exports.signIn = async (req, res) => {
       fcm_token: fcm_token || null,
       business_details,
     });
+
+    if (user.role === "admin") {
+      logActivity({
+        type: "admin_login",
+        message: `Admin login: ${user.email}`,
+        actorUserId: user.id,
+      });
+    }
 
     return res.status(200).json({
       success: true,

@@ -35,6 +35,77 @@ function buildDishHowToMake(menuItems, language) {
     .filter(Boolean);
 }
 
+function normalizeIngredientRows(raw) {
+  const arr = parseIngredients(raw);
+  const out = [];
+  for (const ing of arr) {
+    const ingredientName = String(ing?.ingredient_name ?? ing?.name ?? "").trim();
+    if (!ingredientName) continue;
+    const unit = String(ing?.unit ?? "").trim();
+    const totalQty = num(ing?.total_quantity ?? ing?.qty);
+    if (totalQty < 0) continue;
+    out.push({
+      ingredient_name: ingredientName,
+      unit,
+      total_quantity: totalQty,
+    });
+  }
+  return out.sort((a, b) =>
+    String(a.ingredient_name).localeCompare(String(b.ingredient_name)),
+  );
+}
+
+/** Supports legacy array storage and `{ customized, items }` wrapper after PATCH. */
+function readDishRequiredIngredientsStorage(raw) {
+  if (raw == null) {
+    return { customized: false, items: [] };
+  }
+  if (Array.isArray(raw)) {
+    const items = normalizeIngredientRows(raw);
+    return { customized: items.length > 0, items };
+  }
+  if (typeof raw === "object") {
+    const items = normalizeIngredientRows(raw.items ?? raw.rows ?? []);
+    const customized =
+      raw.customized === true ||
+      raw.v === 1 ||
+      (raw.customized !== false && items.length > 0);
+    return { customized, items };
+  }
+  return { customized: false, items: [] };
+}
+
+/** Persist as a plain array so older API builds can read saved qty/unit. */
+function writeDishRequiredIngredientsStorage(items) {
+  return items;
+}
+
+function normalizeDishRequiredIngredientsPayload(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  for (const ing of raw) {
+    const ingredientName = String(ing?.ingredient_name ?? ing?.name ?? "").trim();
+    if (!ingredientName) continue;
+    const unit = String(ing?.unit ?? "").trim();
+    const totalQty = num(ing?.total_quantity ?? ing?.qty);
+    if (totalQty < 0) continue;
+    out.push({
+      ingredient_name: ingredientName,
+      unit,
+      total_quantity: totalQty,
+    });
+  }
+  return out;
+}
+
+function resolveTotalRequiredIngredients(dish) {
+  const stored = readDishRequiredIngredientsStorage(dish.requiredIngredients);
+  if (dish.requiredIngredientsCustomized === true || stored.customized) {
+    return stored.items;
+  }
+  return buildTotalRequiredIngredients(dish.menuItems || []);
+}
+
 function buildTotalRequiredIngredients(menuItems) {
   const buckets = new Map();
   for (const row of menuItems || []) {
@@ -65,6 +136,56 @@ function buildTotalRequiredIngredients(menuItems) {
   );
 }
 
+/** Fields loaded for list / picker endpoints (avoids large MenuItem.ingredients blobs). */
+const DISH_LIST_MENU_ITEM_SELECT = {
+  id: true,
+  name: true,
+  pricePerPerson: true,
+  categorySlug: true,
+  category: { select: { slug: true, name: true } },
+};
+
+const DISH_LIST_INCLUDE = {
+  menuItems: {
+    orderBy: { createdAt: "asc" },
+    select: {
+      id: true,
+      menuItemId: true,
+      quantity: true,
+      menuItem: { select: DISH_LIST_MENU_ITEM_SELECT },
+    },
+  },
+};
+
+function serializeDishListItem(dish, language) {
+  return {
+    id: dish.id,
+    business_id: dish.businessId,
+    name: dish.name,
+    price_per_plate: num(dish.pricePerPlate),
+    is_template: dish.isTemplate,
+    parent_dish_id: dish.parentDishId,
+    menu_items: (dish.menuItems || []).map((row) => ({
+      id: row.id,
+      menu_item_id: row.menuItemId,
+      quantity: row.quantity ?? 1,
+      menu_item: row.menuItem
+        ? {
+            id: row.menuItem.id,
+            name: resolveLocalizedName(row.menuItem.name, language),
+            price_per_person: num(row.menuItem.pricePerPerson),
+            category: {
+              name: resolveLocalizedName(row.menuItem.category?.name, language),
+              slug: row.menuItem.category?.slug ?? row.menuItem.categorySlug,
+            },
+          }
+        : undefined,
+    })),
+    created_at: dish.createdAt?.toISOString?.() ?? dish.createdAt,
+    updated_at: dish.updatedAt?.toISOString?.() ?? dish.updatedAt,
+  };
+}
+
 function serializeDish(dish, options = {}) {
   const includeComputed = options.includeComputed === true;
   const language = options.language || "en";
@@ -72,8 +193,12 @@ function serializeDish(dish, options = {}) {
     ? buildDishHowToMake(dish.menuItems || [], language)
     : undefined;
   const totalRequiredIngredients = includeComputed
-    ? buildTotalRequiredIngredients(dish.menuItems || [])
+    ? resolveTotalRequiredIngredients(dish)
     : undefined;
+  const stored = includeComputed
+    ? readDishRequiredIngredientsStorage(dish.requiredIngredients)
+    : { customized: false, items: [] };
+  const savedRequiredIngredients = includeComputed ? stored.items : undefined;
   return {
     id: dish.id,
     business_id: dish.businessId,
@@ -103,6 +228,9 @@ function serializeDish(dish, options = {}) {
       ? {
           how_to_make: howToMake,
           total_required_ingredients: totalRequiredIngredients,
+          saved_required_ingredients: savedRequiredIngredients,
+          has_saved_required_ingredients:
+            dish.requiredIngredientsCustomized === true || stored.customized,
         }
       : {}),
     created_at: dish.createdAt?.toISOString?.() ?? dish.createdAt,
@@ -139,18 +267,13 @@ async function listDishes(req, res) {
         orderBy: { updatedAt: "desc" },
         skip,
         take: perPage,
-        include: {
-          menuItems: {
-            include: { menuItem: { include: { category: true } } },
-            orderBy: { createdAt: "asc" },
-          },
-        },
+        include: DISH_LIST_INCLUDE,
       }),
       prisma.dish.count({ where }),
     ]);
     const lastPage = Math.max(1, Math.ceil(total / perPage));
     return successResponse(res, "OK", {
-      items: rows.map((row) => serializeDish(row, { language: requestedLanguage })),
+      items: rows.map((row) => serializeDishListItem(row, requestedLanguage)),
       pagination: {
         total,
         page,
@@ -258,6 +381,31 @@ async function updateDish(req, res) {
       body.name !== undefined ? String(body.name ?? "").trim() : existing.name;
     if (!name) return errorResponse(res, "Dish name required", 422, "VALIDATION_ERROR");
     const menuItems = Array.isArray(body.menu_items) ? body.menu_items : null;
+    let requiredIngredientsUpdate;
+    const requiredIngredientsBody =
+      body.required_ingredients !== undefined
+        ? body.required_ingredients
+        : body.requiredIngredients;
+    if (requiredIngredientsBody !== undefined) {
+      if (!Array.isArray(requiredIngredientsBody)) {
+        return errorResponse(
+          res,
+          "required_ingredients must be an array",
+          422,
+          "VALIDATION_ERROR",
+        );
+      }
+      const normalized = normalizeDishRequiredIngredientsPayload(requiredIngredientsBody);
+      if (normalized === null) {
+        return errorResponse(
+          res,
+          "required_ingredients must be an array",
+          422,
+          "VALIDATION_ERROR",
+        );
+      }
+      requiredIngredientsUpdate = normalized;
+    }
     await prisma.$transaction(async (tx) => {
       await tx.dish.update({
         where: { id },
@@ -267,6 +415,13 @@ async function updateDish(req, res) {
             body.price_per_plate !== undefined
               ? new Prisma.Decimal(String(num(body.price_per_plate)))
               : existing.pricePerPlate,
+          ...(requiredIngredientsUpdate !== undefined
+            ? {
+                requiredIngredients:
+                  writeDishRequiredIngredientsStorage(requiredIngredientsUpdate),
+                requiredIngredientsCustomized: true,
+              }
+            : {}),
         },
       });
       if (menuItems) {
@@ -297,7 +452,11 @@ async function updateDish(req, res) {
         },
       },
     });
-    return successResponse(res, "Dish updated", serializeDish(updated, { language: requestedLanguage }));
+    return successResponse(
+      res,
+      "Dish updated",
+      serializeDish(updated, { includeComputed: true, language: requestedLanguage }),
+    );
   } catch (e) {
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }

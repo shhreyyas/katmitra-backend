@@ -49,6 +49,7 @@ function formatUserResponse(user, overrides = {}) {
     created_at: user.createdAt,
     updated_at: user.updatedAt,
     deleted_at: user.deletedAt ?? null,
+    role: user.role,
     ...overrides,
   };
 }

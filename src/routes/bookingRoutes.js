@@ -14,11 +14,13 @@ const {
   getBooking,
   completeBookingOrder,
   deleteBooking,
+  cancelBooking,
   confirmBooking,
   recordPayment,
   triggerBookingPdfJobs,
   retryBookingPdfJob,
 } = require("../controllers/bookingController");
+const { listScheduleEvents } = require("../controllers/scheduleController");
 
 // Create Booking
 router.post(
@@ -68,6 +70,14 @@ router.get(
   listBookings,
 );
 
+// Schedule tab — bookings + quotations in one response
+router.get(
+  "/v1/scheduleEvents",
+  authMiddleware,
+  businessContextMiddleware,
+  listScheduleEvents,
+);
+
 // Get Booking
 router.get(
   "/v1/getBooking/:id",
@@ -90,6 +100,14 @@ router.post(
   authMiddleware,
   businessContextMiddleware,
   completeBookingOrder,
+);
+
+// Cancel confirmed booking
+router.post(
+  "/v1/bookings/:id/cancel",
+  authMiddleware,
+  businessContextMiddleware,
+  cancelBooking,
 );
 
 // Update Booking Event
