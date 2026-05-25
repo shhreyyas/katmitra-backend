@@ -21,13 +21,27 @@ const activeCatererWhere = {
   deletedAt: null,
 };
 
+/**
+ * A user receives push notifications only when:
+ *  1. They are an active caterer (not admin, not deleted)
+ *  2. notificationStatus = 1  (OS permission granted and not opted-out)
+ *  3. They have a non-null FCM token stored on the User row
+ */
+const notifiableCatererWhere = {
+  ...activeCatererWhere,
+  notificationStatus: 1,
+};
+
 async function countBroadcastAudience() {
   const [sentCount, tokensCount] = await prisma.$transaction([
+    // sentCount = all active caterers (for audit log)
     prisma.user.count({ where: activeCatererWhere }),
-    prisma.userDevice.count({
+    // tokensCount = users who will actually receive the push
+    // deviceToken now lives directly on User (no UserDevice table)
+    prisma.user.count({
       where: {
-        fcmToken: { not: null },
-        user: activeCatererWhere,
+        ...notifiableCatererWhere,
+        deviceToken: { not: null },
       },
     }),
   ]);
@@ -107,7 +121,7 @@ exports.sendNotification = async (req, res) => {
       meta: { sent_count: sentCount, tokens_count: tokensCount },
     });
 
-    // Push delivery is not wired in the API yet; mobile uses FCM tokens on UserDevice.
+    // Push delivery is not wired in the API yet; mobile uses FCM tokens stored on the User row.
     return successResponse(
       res,
       "Notification logged",

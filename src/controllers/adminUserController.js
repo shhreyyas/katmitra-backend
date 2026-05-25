@@ -134,7 +134,6 @@ exports.getUser = async (req, res) => {
             serviceLinks: { include: { serviceType: true } },
           },
         },
-        devices: { orderBy: { createdAt: "desc" }, take: 1 },
       },
     });
 
@@ -159,8 +158,6 @@ exports.getUser = async (req, res) => {
       });
     }
 
-    const lastDevice = user.devices?.[0];
-
     return successResponse(res, "User detail", {
       user: {
         id: user.id,
@@ -171,7 +168,7 @@ exports.getUser = async (req, res) => {
         is_verified: user.isVerified,
         status: user.deletedAt ? "suspended" : "active",
         created_at: user.createdAt.toISOString(),
-        last_login_at: lastDevice?.createdAt?.toISOString() ?? null,
+        last_login_at: user.updatedAt?.toISOString() ?? null,
       },
       business: user.business ? formatBusinessDetail(user.business) : null,
       plan_type: derivePlanLabel(user.business),

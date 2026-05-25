@@ -187,9 +187,6 @@ exports.registerBusiness = async (req, res) => {
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      include: {
-        devices: { orderBy: { createdAt: "desc" }, take: 1 },
-      },
     });
 
     if (!user) {
@@ -338,7 +335,6 @@ exports.registerBusiness = async (req, res) => {
       { expiresIn: "7d" },
     );
 
-    const device = user.devices[0];
     const business_details = [formatBusinessDetail(fullBusiness)];
 
     const refreshed = {
@@ -351,8 +347,8 @@ exports.registerBusiness = async (req, res) => {
 
     const formattedUser = formatUserResponse(refreshed, {
       status: 1,
-      device_type: device?.deviceType ?? null,
-      fcm_token: device?.fcmToken ?? null,
+      device_type: user.deviceType ?? null,
+      device_token: user.deviceToken ?? null,
       business_details,
     });
 
@@ -461,9 +457,6 @@ exports.updateBusiness = async (req, res) => {
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      include: {
-        devices: { orderBy: { createdAt: "desc" }, take: 1 },
-      },
     });
 
     if (!user || !fullBusiness) {
@@ -476,13 +469,12 @@ exports.updateBusiness = async (req, res) => {
       { expiresIn: "7d" },
     );
 
-    const device = user.devices[0];
     const business_details = [formatBusinessDetail(fullBusiness)];
 
     const formattedUser = formatUserResponse(user, {
       status: 1,
-      device_type: device?.deviceType ?? null,
-      fcm_token: device?.fcmToken ?? null,
+      device_type: user.deviceType ?? null,
+      device_token: user.deviceToken ?? null,
       business_details,
     });
 

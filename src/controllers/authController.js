@@ -14,30 +14,24 @@ const validatePassword = (password) => {
   return regex.test(password);
 };
 
-/** 1 if a non-empty fcm_token is provided, otherwise 0 */
-function notificationStatusFromFcmToken(fcm_token) {
-  return fcm_token != null && String(fcm_token).trim() !== "" ? 1 : 0;
+/** 1 if a non-empty device_token is provided, otherwise 0 */
+function notificationStatusFromDeviceToken(device_token) {
+  return device_token != null && String(device_token).trim() !== "" ? 1 : 0;
 }
 
-async function upsertUserDevice(userId, deviceType, fcmToken) {
+/**
+ * Single-device policy: store the current device's token directly on the
+ * User row. Replaces the previous token in one atomic update.
+ */
+async function setUserDevice(userId, deviceType, deviceToken) {
   if (deviceType === undefined) return;
-  const existing = await prisma.userDevice.findFirst({
-    where: { userId, deviceType },
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      deviceToken: deviceToken ?? null,
+      deviceType,
+    },
   });
-  if (existing) {
-    await prisma.userDevice.update({
-      where: { id: existing.id },
-      data: { fcmToken: fcmToken ?? null },
-    });
-  } else {
-    await prisma.userDevice.create({
-      data: {
-        userId,
-        deviceType,
-        fcmToken: fcmToken ?? null,
-      },
-    });
-  }
 }
 
 function formatBusinessDetail(business) {
@@ -90,7 +84,7 @@ exports.signup = async (req, res) => {
       contact,
       password,
       device_type,
-      fcm_token,
+      device_token,
     } = req.body;
 
     if (
@@ -145,7 +139,7 @@ exports.signup = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 8);
 
-    const notificationStatus = notificationStatusFromFcmToken(fcm_token);
+    const notificationStatus = notificationStatusFromDeviceToken(device_token);
 
     const user = await prisma.user.create({
       data: {
@@ -158,7 +152,7 @@ exports.signup = async (req, res) => {
       },
     });
 
-    await upsertUserDevice(user.id, device_type, fcm_token);
+    await setUserDevice(user.id, device_type, device_token);
 
     await prisma.otpCode.deleteMany({
       where: { email, type: "signup" },
@@ -179,17 +173,18 @@ exports.signup = async (req, res) => {
       console.error("Signup OTP email failed:", emailErr.message);
     });
 
+    // sessionVersion starts at 0 for a new user (default in DB)
     const token = jwt.sign(
-      { userId: user.id, businessId: null, role: user.role },
+      { userId: user.id, businessId: null, role: user.role, sessionVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: "7d" },
+      {},
     );
 
     const formattedUser = formatUserResponse(user, {
       user_type: 1,
       email_verified_at: null,
       device_type,
-      fcm_token: fcm_token || null,
+      device_token: device_token || null,
     });
 
     return res.status(200).json({
@@ -285,22 +280,18 @@ exports.verifyOtp = async (req, res) => {
         userId: updatedUser.id,
         businessId: updatedUser.businessId,
         role: updatedUser.role,
+        sessionVersion: updatedUser.sessionVersion,
       },
       process.env.JWT_SECRET,
-      { expiresIn: "7d" },
+      {},
     );
-
-    const device = await prisma.userDevice.findFirst({
-      where: { userId: updatedUser.id },
-      orderBy: { createdAt: "desc" },
-    });
 
     const formattedUser = formatUserResponse(updatedUser, {
       status: 1,
       user_type: 1,
       user_verified_at: verifiedAt.toISOString(),
-      device_type: device?.deviceType ?? null,
-      fcm_token: device?.fcmToken ?? null,
+      device_type: updatedUser.deviceType ?? null,
+      device_token: updatedUser.deviceToken ?? null,
     });
 
     return successResponse(
@@ -320,7 +311,7 @@ exports.verifyOtp = async (req, res) => {
 
 exports.signIn = async (req, res) => {
   try {
-    const { email, password, device_type, fcm_token } = req.body;
+    const { email, password, device_type, device_token } = req.body;
 
     if (!email || !password || device_type === undefined) {
       return errorResponse(
@@ -374,24 +365,34 @@ exports.signIn = async (req, res) => {
         console.error("Login OTP email failed:", emailErr.message);
       });
 
-      const token = jwt.sign(
-        { userId: user.id, businessId: user.businessId, role: user.role },
-        process.env.JWT_SECRET,
-        { expiresIn: "7d" },
-      );
-
-      await upsertUserDevice(user.id, device_type, fcm_token);
-
-      const notificationStatus = notificationStatusFromFcmToken(fcm_token);
-      await prisma.user.update({
+      // Increment sessionVersion to invalidate any existing session on another device,
+      // then update notificationStatus — both in one write.
+      const notificationStatusUnverified = notificationStatusFromDeviceToken(device_token);
+      const updatedUnverified = await prisma.user.update({
         where: { id: user.id },
-        data: { notificationStatus },
+        data: {
+          notificationStatus: notificationStatusUnverified,
+          sessionVersion: { increment: 1 },
+        },
       });
 
-      const formattedUser = formatUserResponse(user, {
+      await setUserDevice(user.id, device_type, device_token);
+
+      const token = jwt.sign(
+        {
+          userId: updatedUnverified.id,
+          businessId: updatedUnverified.businessId,
+          role: updatedUnverified.role,
+          sessionVersion: updatedUnverified.sessionVersion,
+        },
+        process.env.JWT_SECRET,
+        {},
+      );
+
+      const formattedUser = formatUserResponse(updatedUnverified, {
         status: 1,
         device_type,
-        fcm_token: fcm_token || null,
+        device_token: device_token || null,
         business_details: await loadBusinessDetailsArray(user.businessId),
       });
 
@@ -405,34 +406,43 @@ exports.signIn = async (req, res) => {
       });
     }
 
-    await upsertUserDevice(user.id, device_type, fcm_token);
-
-    const notificationStatus = notificationStatusFromFcmToken(fcm_token);
-    await prisma.user.update({
+    // Increment sessionVersion to kick out any active session on another device.
+    const notificationStatus = notificationStatusFromDeviceToken(device_token);
+    const updatedUser = await prisma.user.update({
       where: { id: user.id },
-      data: { notificationStatus },
+      data: {
+        notificationStatus,
+        sessionVersion: { increment: 1 },
+      },
     });
 
+    await setUserDevice(updatedUser.id, device_type, device_token);
+
     const token = jwt.sign(
-      { userId: user.id, businessId: user.businessId, role: user.role },
+      {
+        userId: updatedUser.id,
+        businessId: updatedUser.businessId,
+        role: updatedUser.role,
+        sessionVersion: updatedUser.sessionVersion,
+      },
       process.env.JWT_SECRET,
-      { expiresIn: "7d" },
+      {},
     );
 
-    const business_details = await loadBusinessDetailsArray(user.businessId);
+    const business_details = await loadBusinessDetailsArray(updatedUser.businessId);
 
-    const formattedUser = formatUserResponse(user, {
+    const formattedUser = formatUserResponse(updatedUser, {
       status: 1,
       device_type,
-      fcm_token: fcm_token || null,
+      device_token: device_token || null,
       business_details,
     });
 
-    if (user.role === "admin") {
+    if (updatedUser.role === "admin") {
       logActivity({
         type: "admin_login",
-        message: `Admin login: ${user.email}`,
-        actorUserId: user.id,
+        message: `Admin login: ${updatedUser.email}`,
+        actorUserId: updatedUser.id,
       });
     }
 
@@ -729,28 +739,26 @@ exports.updateUserProfile = async (req, res) => {
       data,
     });
 
-    const device = await prisma.userDevice.findFirst({
-      where: { userId },
-      orderBy: { createdAt: "desc" },
-    });
-
     const business_details = await loadBusinessDetailsArray(updated.businessId);
 
+    // Preserve the current sessionVersion — a profile update is not a new login,
+    // so we must not increment it (that would invalidate the caller's own session).
     const token = jwt.sign(
       {
         userId: updated.id,
         businessId: updated.businessId,
         role: updated.role,
+        sessionVersion: req.user.sessionVersion,
       },
       process.env.JWT_SECRET,
-      { expiresIn: "7d" },
+      {},
     );
 
     const formattedUser = formatUserResponse(updated, {
       status: 1,
       user_type: 1,
-      device_type: device?.deviceType ?? null,
-      fcm_token: device?.fcmToken ?? null,
+      device_type: updated.deviceType ?? null,
+      device_token: updated.deviceToken ?? null,
       business_details,
     });
 
@@ -797,9 +805,6 @@ exports.deleteUser = async (req, res) => {
       prisma.otpCode.deleteMany({
         where: { email: user.email },
       }),
-      prisma.userDevice.deleteMany({
-        where: { userId },
-      }),
       prisma.user.delete({
         where: { id: userId },
       }),
@@ -835,6 +840,114 @@ exports.deleteUser = async (req, res) => {
     return successResponse(res, "User deleted successfully", null, 200);
   } catch (error) {
     console.error("Delete user error:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+/**
+ * POST /v1/signout  (requires auth)
+ *
+ * Explicit logout:
+ *  1. Increments sessionVersion  → the caller's own JWT is immediately dead,
+ *     so even if the token leaks it cannot be reused.
+ *  2. Clears deviceToken on the User row → stops push notifications to this device.
+ */
+exports.signOut = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    // Single update: increment sessionVersion (invalidates old JWT) and clear
+    // the FCM token so this device stops receiving push notifications.
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        sessionVersion: { increment: 1 },
+        deviceToken: null,
+        deviceType: null,
+      },
+    });
+
+    return successResponse(res, "Logged out successfully", null, 200);
+  } catch (error) {
+    console.error("Sign-out error:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+/**
+ * PATCH /v1/device  (requires auth)
+ *
+ * Called by the app on cold start and every time it comes to the foreground.
+ * Updates the FCM token for this user's device so push notifications stay
+ * current without requiring a full sign-out / sign-in cycle.
+ *
+ * Body: { device_type: number, device_token: string }
+ */
+exports.updateDevice = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { device_type, device_token } = req.body;
+
+    if (device_type === undefined) {
+      return errorResponse(
+        res,
+        "device_type is required",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    await setUserDevice(userId, device_type, device_token);
+
+    const notificationStatus = notificationStatusFromDeviceToken(device_token);
+    await prisma.user.update({
+      where: { id: userId },
+      data: { notificationStatus },
+    });
+
+    return successResponse(res, "Device updated", null, 200);
+  } catch (error) {
+    console.error("updateDevice error:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+/**
+ * PATCH /v1/user/notification  (requires auth)
+ *
+ * Explicit user preference toggle — does NOT touch the FCM token row,
+ * just flips notificationStatus so the backend knows whether to include
+ * this user in push broadcasts.
+ *
+ * Body: { enabled: boolean }
+ */
+exports.updateNotificationPreference = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { enabled } = req.body;
+
+    if (typeof enabled !== "boolean") {
+      return errorResponse(
+        res,
+        "enabled must be a boolean",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: { notificationStatus: enabled ? 1 : 0 },
+    });
+
+    return successResponse(
+      res,
+      enabled ? "Notifications enabled" : "Notifications disabled",
+      { notification_status: updated.notificationStatus },
+      200,
+    );
+  } catch (error) {
+    console.error("updateNotificationPreference error:", error.message);
     return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
