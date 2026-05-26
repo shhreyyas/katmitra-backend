@@ -463,8 +463,11 @@ exports.updateBusiness = async (req, res) => {
       return errorResponse(res, "Not found", 404, "NOT_FOUND");
     }
 
+    // Preserve the current sessionVersion — a business update is not a new login,
+    // so we must not omit it (that would make decoded.sessionVersion === undefined,
+    // which never matches the DB value and instantly triggers the "another device" logout).
     const token = jwt.sign(
-      { userId, businessId, role: user.role },
+      { userId, businessId, role: user.role, sessionVersion: req.user.sessionVersion },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );

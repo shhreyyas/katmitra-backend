@@ -238,32 +238,51 @@ function resolveTotalDueForPayment(booking) {
   return stored;
 }
 
+// Selectable options: breakfast, lunch, dinner.
 const JAMANVAR_SLUGS = new Set([
-  "morningbreakfast",
+  "breakfast",
   "lunch",
   "dinner",
-  "eveningnasto",
 ]);
 
+// Legacy slugs written by older app versions — normalize to current canonical key.
+const JAMANVAR_LEGACY_MAP = {
+  morningbreakfast: "breakfast",
+  eveningnasto: "breakfast",
+};
+
+/** Normalize any jamanvar slug (including legacy) to a canonical value. */
+function normalizeJamanvarSlug(v) {
+  if (!v || typeof v !== "string") return null;
+  const norm = v.trim().toLowerCase().replace(/[^a-z]/g, "");
+  if (JAMANVAR_LEGACY_MAP[norm]) return JAMANVAR_LEGACY_MAP[norm];
+  // Find canonical key whose normalized form matches
+  for (const slug of JAMANVAR_SLUGS) {
+    if (slug.toLowerCase().replace(/[^a-z]/g, "") === norm) return slug;
+  }
+  return null;
+}
+
 function isStoredJamanvarSlug(v) {
-  if (!v || typeof v !== "string") return false;
-  return JAMANVAR_SLUGS.has(v.toLowerCase().replace(/[^a-z]/g, ""));
+  return normalizeJamanvarSlug(v) !== null;
 }
 
 function resolveEventJamanvarType(ev) {
-  if (ev.jamanvarType) return ev.jamanvarType;
-  if (isStoredJamanvarSlug(ev.functionType)) return ev.functionType;
+  if (ev.jamanvarType) return normalizeJamanvarSlug(ev.jamanvarType) ?? ev.jamanvarType;
+  if (isStoredJamanvarSlug(ev.functionType)) return normalizeJamanvarSlug(ev.functionType);
   return null;
 }
 
 function jamanvarTypeFromEventBody(ev, current) {
   if (ev.jamanvar_type !== undefined) {
-    return ev.jamanvar_type != null ? String(ev.jamanvar_type).trim() : null;
+    if (ev.jamanvar_type == null) return null;
+    return normalizeJamanvarSlug(String(ev.jamanvar_type).trim()) ?? String(ev.jamanvar_type).trim();
   }
   if (ev.function_type !== undefined && isStoredJamanvarSlug(ev.function_type)) {
-    return String(ev.function_type).trim();
+    return normalizeJamanvarSlug(String(ev.function_type).trim());
   }
-  return current?.jamanvarType ?? null;
+  const cur = current?.jamanvarType ?? null;
+  return cur ? (normalizeJamanvarSlug(cur) ?? cur) : null;
 }
 
 function serializeBookingEvent(ev) {
