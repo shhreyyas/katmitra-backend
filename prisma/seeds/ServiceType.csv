@@ -1,0 +1,8 @@
+name,slug,status
+"{""en"":""Wedding"",""hi"":""शादी"",""gu"":""લગ્ન""}",wedding,1
+"{""en"":""Corporate Event"",""hi"":""कॉर्पोरेट इवेंट"",""gu"":""કોર્પોરેટ ઇવેન્ટ""}",corporate,1
+"{""en"":""Birthday Party"",""hi"":""जन्मदिन पार्टी"",""gu"":""જન્મદિવસ પાર્ટી""}",birthday,1
+"{""en"":""Religious / Pooja"",""hi"":""धार्मिक / पूजा"",""gu"":""ધાર્મિક / પૂજા""}",religious,1
+"{""en"":""Anniversary"",""hi"":""सालगिरह"",""gu"":""વર્ષગાંઠ""}",anniversary,1
+"{""en"":""Social Gathering"",""hi"":""सामाजिक कार्यक्रम"",""gu"":""સામાજિક ઇવેન્ટ""}",social-gathering,1
+"{""en"":""Engagement"",""hi"":""सगाई"",""gu"":""સગાઈ""}",engagement,1

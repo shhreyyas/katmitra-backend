@@ -1,0 +1,11 @@
+name,slug,sortOrder,isActive
+"{""en"":""Vegetables"",""hi"":""सब्जियां"",""gu"":""શાકભાજી""}",vegetables,1,true
+"{""en"":""Spices & Masala"",""hi"":""मसाले"",""gu"":""મસાલા""}",spices,2,true
+"{""en"":""Dairy Products"",""hi"":""डेयरी उत्पाद"",""gu"":""ડેરી ઉત્પાદ""}",dairy,3,true
+"{""en"":""Oils & Ghee"",""hi"":""तेल और घी"",""gu"":""તેલ અને ઘી""}",oil-ghee,4,true
+"{""en"":""Dry Fruits & Nuts"",""hi"":""मेवे"",""gu"":""ડ્રાય ફ્રૂટ""}",dry-fruits,5,true
+"{""en"":""Pulses & Lentils"",""hi"":""दालें"",""gu"":""કઠોળ""}",pulses,6,true
+"{""en"":""Grains & Flour"",""hi"":""अनाज और आटा"",""gu"":""ધાન્ય અને લોટ""}",grains-flour,7,true
+"{""en"":""Fresh Herbs"",""hi"":""ताजी जड़ी-बूटियां"",""gu"":""તાજી ભાજી""}",fresh-herbs,8,true
+"{""en"":""Cooking Equipment"",""hi"":""रसोई उपकरण"",""gu"":""રસોઈ સામગ્રી""}",cooking-equipment,9,true
+"{""en"":""Serving Equipment"",""hi"":""परोसने के बर्तन"",""gu"":""પીરસવાના વાસણ""}",serving-equipment,10,true

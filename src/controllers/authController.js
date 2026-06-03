@@ -365,18 +365,20 @@ exports.signIn = async (req, res) => {
         console.error("Login OTP email failed:", emailErr.message);
       });
 
-      // Increment sessionVersion to invalidate any existing session on another device,
-      // then update notificationStatus — both in one write.
+      // Merge session + device writes into one round-trip, load business in parallel.
       const notificationStatusUnverified = notificationStatusFromDeviceToken(device_token);
-      const updatedUnverified = await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          notificationStatus: notificationStatusUnverified,
-          sessionVersion: { increment: 1 },
-        },
-      });
-
-      await setUserDevice(user.id, device_type, device_token);
+      const [updatedUnverified, unverifiedBusinessDetails] = await Promise.all([
+        prisma.user.update({
+          where: { id: user.id },
+          data: {
+            notificationStatus: notificationStatusUnverified,
+            sessionVersion: { increment: 1 },
+            deviceToken: device_type !== undefined ? (device_token ?? null) : undefined,
+            deviceType: device_type !== undefined ? device_type : undefined,
+          },
+        }),
+        loadBusinessDetailsArray(user.businessId),
+      ]);
 
       const token = jwt.sign(
         {
@@ -393,7 +395,7 @@ exports.signIn = async (req, res) => {
         status: 1,
         device_type,
         device_token: device_token || null,
-        business_details: await loadBusinessDetailsArray(user.businessId),
+        business_details: unverifiedBusinessDetails,
       });
 
       return res.status(200).json({
@@ -406,17 +408,21 @@ exports.signIn = async (req, res) => {
       });
     }
 
-    // Increment sessionVersion to kick out any active session on another device.
+    // Merge the two writes (session + device) into one round-trip, and run the
+    // business lookup in parallel — cuts 2 sequential DB calls down to 1.
     const notificationStatus = notificationStatusFromDeviceToken(device_token);
-    const updatedUser = await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        notificationStatus,
-        sessionVersion: { increment: 1 },
-      },
-    });
-
-    await setUserDevice(updatedUser.id, device_type, device_token);
+    const [updatedUser, business_details] = await Promise.all([
+      prisma.user.update({
+        where: { id: user.id },
+        data: {
+          notificationStatus,
+          sessionVersion: { increment: 1 },
+          deviceToken: device_type !== undefined ? (device_token ?? null) : undefined,
+          deviceType: device_type !== undefined ? device_type : undefined,
+        },
+      }),
+      loadBusinessDetailsArray(user.businessId),
+    ]);
 
     const token = jwt.sign(
       {
@@ -428,8 +434,6 @@ exports.signIn = async (req, res) => {
       process.env.JWT_SECRET,
       {},
     );
-
-    const business_details = await loadBusinessDetailsArray(updatedUser.businessId);
 
     const formattedUser = formatUserResponse(updatedUser, {
       status: 1,

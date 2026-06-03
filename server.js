@@ -1,10 +1,12 @@
 const app = require("./src/app");
 const prisma = require("./src/config/prisma");
+const { startEventReminderCron } = require("./src/services/eventReminderCron");
 
 const PORT = process.env.PORT || 3000;
 
 const server = app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  startEventReminderCron();
 });
 
 async function shutdown(signal) {

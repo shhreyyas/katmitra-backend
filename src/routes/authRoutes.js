@@ -33,4 +33,16 @@ router.post("/v1/upload-profile-image", authMiddleware, uploadProfileImage);
 router.patch("/v1/user/profile", authMiddleware, updateUserProfile);
 router.post("/v1/delete-user", deleteUser);
 
+// User notifications
+const {
+  listNotifications,
+  getUnreadCount,
+  markAsRead,
+  markAllAsRead,
+} = require("../controllers/userNotificationController");
+router.get("/v1/notifications", authMiddleware, listNotifications);
+router.get("/v1/notifications/unread-count", authMiddleware, getUnreadCount);
+router.put("/v1/notifications/read-all", authMiddleware, markAllAsRead);
+router.put("/v1/notifications/:id/read", authMiddleware, markAsRead);
+
 module.exports = router;

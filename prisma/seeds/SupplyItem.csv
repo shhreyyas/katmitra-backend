@@ -1,0 +1,66 @@
+name,type,categorySlug,unitOptions,defaultUnit,isGlobal,isActive
+"{""en"":""Onion"",""hi"":""प्याज"",""gu"":""ડુંગળી""}",INGREDIENT,vegetables,{kg,g},kg,true,true
+"{""en"":""Tomato"",""hi"":""टमाटर"",""gu"":""ટામેટા""}",INGREDIENT,vegetables,{kg,g},kg,true,true
+"{""en"":""Potato"",""hi"":""आलू"",""gu"":""બટેટા""}",INGREDIENT,vegetables,{kg,g},kg,true,true
+"{""en"":""Capsicum"",""hi"":""शिमला मिर्च"",""gu"":""સિમ્લા મરચ""}",INGREDIENT,vegetables,{kg,g},kg,true,true
+"{""en"":""Carrot"",""hi"":""गाजर"",""gu"":""ગાજર""}",INGREDIENT,vegetables,{kg,g},kg,true,true
+"{""en"":""Cauliflower"",""hi"":""गोभी"",""gu"":""ફૂલગોભી""}",INGREDIENT,vegetables,{pcs,kg},pcs,true,true
+"{""en"":""Peas"",""hi"":""मटर"",""gu"":""વટાણા""}",INGREDIENT,vegetables,{kg,g},kg,true,true
+"{""en"":""Eggplant"",""hi"":""बैंगन"",""gu"":""રીંગણ""}",INGREDIENT,vegetables,{kg,g},kg,true,true
+"{""en"":""Okra"",""hi"":""भिंडी"",""gu"":""ભીંડા""}",INGREDIENT,vegetables,{kg,g},kg,true,true
+"{""en"":""Spinach"",""hi"":""पालक"",""gu"":""પાલક""}",INGREDIENT,vegetables,{kg,g,bunch},kg,true,true
+"{""en"":""Turmeric Powder"",""hi"":""हल्दी"",""gu"":""હળદર""}",INGREDIENT,spices,{kg,g,pkt},g,true,true
+"{""en"":""Red Chilli Powder"",""hi"":""लाल मिर्च पाउडर"",""gu"":""લાલ મરચું પાઉડર""}",INGREDIENT,spices,{kg,g,pkt},g,true,true
+"{""en"":""Coriander Powder"",""hi"":""धनिया पाउडर"",""gu"":""ધાણા પાઉડર""}",INGREDIENT,spices,{kg,g,pkt},g,true,true
+"{""en"":""Cumin Seeds"",""hi"":""जीरा"",""gu"":""જીરું""}",INGREDIENT,spices,{kg,g},g,true,true
+"{""en"":""Mustard Seeds"",""hi"":""राई"",""gu"":""રાઈ""}",INGREDIENT,spices,{kg,g},g,true,true
+"{""en"":""Garam Masala"",""hi"":""गरम मसाला"",""gu"":""ગરમ મસાલો""}",INGREDIENT,spices,{kg,g,pkt},g,true,true
+"{""en"":""Salt"",""hi"":""नमक"",""gu"":""મીઠું""}",INGREDIENT,spices,{kg,g,pkt},kg,true,true
+"{""en"":""Asafoetida"",""hi"":""हींग"",""gu"":""હિંગ""}",INGREDIENT,spices,{g,pkt},g,true,true
+"{""en"":""Cardamom"",""hi"":""इलायची"",""gu"":""એલચી""}",INGREDIENT,spices,{g,pkt},g,true,true
+"{""en"":""Cloves"",""hi"":""लौंग"",""gu"":""લવિંગ""}",INGREDIENT,spices,{g,pkt},g,true,true
+"{""en"":""Milk"",""hi"":""दूध"",""gu"":""દૂધ""}",INGREDIENT,dairy,{ltr,ml},ltr,true,true
+"{""en"":""Curd"",""hi"":""दही"",""gu"":""દહીં""}",INGREDIENT,dairy,{kg,g,ltr},kg,true,true
+"{""en"":""Paneer"",""hi"":""पनीर"",""gu"":""પનીર""}",INGREDIENT,dairy,{kg,g},kg,true,true
+"{""en"":""Ghee"",""hi"":""घी"",""gu"":""ઘી""}",INGREDIENT,dairy,{kg,g,ltr},kg,true,true
+"{""en"":""Butter"",""hi"":""मक्खन"",""gu"":""માખણ""}",INGREDIENT,dairy,{kg,g},g,true,true
+"{""en"":""Fresh Cream"",""hi"":""क्रीम"",""gu"":""ક્રીમ""}",INGREDIENT,dairy,{ltr,ml},ltr,true,true
+"{""en"":""Khoya (Mawa)"",""hi"":""मावा"",""gu"":""માવો""}",INGREDIENT,dairy,{kg,g},g,true,true
+"{""en"":""Refined Oil"",""hi"":""रिफाइंड तेल"",""gu"":""રિફાઈન્ડ તેલ""}",INGREDIENT,oil-ghee,{ltr,ml},ltr,true,true
+"{""en"":""Mustard Oil"",""hi"":""सरसों का तेल"",""gu"":""સરસવ તેલ""}",INGREDIENT,oil-ghee,{ltr,ml},ltr,true,true
+"{""en"":""Groundnut Oil"",""hi"":""मूंगफली का तेल"",""gu"":""મગફળી તેલ""}",INGREDIENT,oil-ghee,{ltr,ml},ltr,true,true
+"{""en"":""Cashew"",""hi"":""काजू"",""gu"":""કાજુ""}",INGREDIENT,dry-fruits,{kg,g},g,true,true
+"{""en"":""Raisin"",""hi"":""किशमिश"",""gu"":""દ્રાક્ષ""}",INGREDIENT,dry-fruits,{kg,g},g,true,true
+"{""en"":""Almond"",""hi"":""बादाम"",""gu"":""બદામ""}",INGREDIENT,dry-fruits,{kg,g},g,true,true
+"{""en"":""Pistachio"",""hi"":""पिस्ता"",""gu"":""પિસ્તા""}",INGREDIENT,dry-fruits,{kg,g},g,true,true
+"{""en"":""Chana Dal"",""hi"":""चना दाल"",""gu"":""ચણાની દાળ""}",INGREDIENT,pulses,{kg,g},kg,true,true
+"{""en"":""Moong Dal"",""hi"":""मूंग दाल"",""gu"":""મગની દાળ""}",INGREDIENT,pulses,{kg,g},kg,true,true
+"{""en"":""Toor Dal"",""hi"":""तूर दाल"",""gu"":""તુવેર દાળ""}",INGREDIENT,pulses,{kg,g},kg,true,true
+"{""en"":""Urad Dal"",""hi"":""उड़द दाल"",""gu"":""અળદની દાળ""}",INGREDIENT,pulses,{kg,g},kg,true,true
+"{""en"":""Masoor Dal"",""hi"":""मसूर दाल"",""gu"":""મસૂરની દાળ""}",INGREDIENT,pulses,{kg,g},kg,true,true
+"{""en"":""Chickpeas (Kabuli Chana)"",""hi"":""काबुली चना"",""gu"":""ચણા""}",INGREDIENT,pulses,{kg,g},kg,true,true
+"{""en"":""Kidney Beans (Rajma)"",""hi"":""राजमा"",""gu"":""રાજમા""}",INGREDIENT,pulses,{kg,g},kg,true,true
+"{""en"":""Basmati Rice"",""hi"":""बासमती चावल"",""gu"":""બાસમતી ચોખા""}",INGREDIENT,grains-flour,{kg,g,qtl},kg,true,true
+"{""en"":""Regular Rice"",""hi"":""सामान्य चावल"",""gu"":""સામાન્ય ચોખા""}",INGREDIENT,grains-flour,{kg,g,qtl},kg,true,true
+"{""en"":""Wheat Flour (Atta)"",""hi"":""गेहूं का आटा"",""gu"":""ઘઉંનો લોટ""}",INGREDIENT,grains-flour,{kg,g,bag},kg,true,true
+"{""en"":""Maida"",""hi"":""मैदा"",""gu"":""મેંદો""}",INGREDIENT,grains-flour,{kg,g,bag},kg,true,true
+"{""en"":""Suji (Semolina)"",""hi"":""सूजी"",""gu"":""રવો""}",INGREDIENT,grains-flour,{kg,g},kg,true,true
+"{""en"":""Besan (Chickpea Flour)"",""hi"":""बेसन"",""gu"":""બેસન""}",INGREDIENT,grains-flour,{kg,g},kg,true,true
+"{""en"":""Coriander Leaves"",""hi"":""धनिया पत्ती"",""gu"":""ધાણા""}",INGREDIENT,fresh-herbs,{bunch,g,kg},bunch,true,true
+"{""en"":""Mint Leaves"",""hi"":""पुदीना"",""gu"":""ફુદીનો""}",INGREDIENT,fresh-herbs,{bunch,g,kg},bunch,true,true
+"{""en"":""Ginger"",""hi"":""अदरक"",""gu"":""આદુ""}",INGREDIENT,fresh-herbs,{kg,g},kg,true,true
+"{""en"":""Garlic"",""hi"":""लहसुन"",""gu"":""લસણ""}",INGREDIENT,fresh-herbs,{kg,g},kg,true,true
+"{""en"":""Green Chilli"",""hi"":""हरी मिर्च"",""gu"":""લીલાં મરચાં""}",INGREDIENT,fresh-herbs,{kg,g},g,true,true
+"{""en"":""Large Kadai (Wok)"",""hi"":""बड़ी कड़ाही"",""gu"":""મોટી કડાઈ""}",UTENSIL,cooking-equipment,{pcs},pcs,true,true
+"{""en"":""Pressure Cooker"",""hi"":""प्रेशर कुकर"",""gu"":""પ્રેશર કૂકર""}",UTENSIL,cooking-equipment,{pcs},pcs,true,true
+"{""en"":""Tawa (Griddle)"",""hi"":""तवा"",""gu"":""તવો""}",UTENSIL,cooking-equipment,{pcs},pcs,true,true
+"{""en"":""Large Pot (Patila)"",""hi"":""बड़ा पतीला"",""gu"":""મોટો તપેલો""}",UTENSIL,cooking-equipment,{pcs},pcs,true,true
+"{""en"":""Ladle (Karchi)"",""hi"":""करछी"",""gu"":""ઊલ""}",UTENSIL,cooking-equipment,{pcs},pcs,true,true
+"{""en"":""Gas Burner"",""hi"":""गैस बर्नर"",""gu"":""ગૅસ બર્નર""}",UTENSIL,cooking-equipment,{pcs},pcs,true,true
+"{""en"":""LPG Cylinder"",""hi"":""गैस सिलेंडर"",""gu"":""ગૅસ સિલિન્ડર""}",UTENSIL,cooking-equipment,{pcs},pcs,true,true
+"{""en"":""Serving Bowl"",""hi"":""परोसने का कटोरा"",""gu"":""સર્વિંગ વાટકી""}",UTENSIL,serving-equipment,{pcs,dozen},pcs,true,true
+"{""en"":""Serving Spoon"",""hi"":""परोसने का चम्मच"",""gu"":""સર્વિંગ ચમચો""}",UTENSIL,serving-equipment,{pcs,dozen},pcs,true,true
+"{""en"":""Plate (Thali)"",""hi"":""थाली"",""gu"":""થાળ""}",UTENSIL,serving-equipment,{pcs,dozen},pcs,true,true
+"{""en"":""Katori (Small Bowl)"",""hi"":""कटोरी"",""gu"":""કટોરી""}",UTENSIL,serving-equipment,{pcs,dozen},pcs,true,true
+"{""en"":""Glass"",""hi"":""गिलास"",""gu"":""ગ્લાસ""}",UTENSIL,serving-equipment,{pcs,dozen},pcs,true,true
+"{""en"":""Tablecloth"",""hi"":""टेबल क्लॉथ"",""gu"":""ટેબલ ક્લૉથ""}",UTENSIL,serving-equipment,{pcs},pcs,true,true

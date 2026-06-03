@@ -1,6 +1,7 @@
 const prisma = require("../config/prisma");
 const { successResponse, errorResponse } = require("../utils/response");
 const { logActivity } = require("../utils/activityLog");
+const { sendPushNotifications } = require("../utils/expoPush");
 
 function formatNotificationLog(row) {
   return {
@@ -85,7 +86,7 @@ exports.listNotifications = async (req, res) => {
   }
 };
 
-/** POST /api/admin/v1/notifications — log broadcast (FCM send when configured server-side). */
+/** POST /api/admin/v1/notifications — broadcast push notification to eligible users. */
 exports.sendNotification = async (req, res) => {
   try {
     const title = String(req.body?.title ?? "").trim();
@@ -98,8 +99,28 @@ exports.sendNotification = async (req, res) => {
       return errorResponse(res, "Message is required", 422, "VALIDATION_ERROR");
     }
 
-    const { sentCount, tokensCount } = await countBroadcastAudience();
+    // Fetch eligible users:
+    //   - Active caterer (not admin, not deleted)
+    //   - notificationStatus = 1  (OS permission granted, user has not opted out)
+    //   - deviceToken is not null  (device is registered)
+    const [sentCount, eligibleUsers] = await prisma.$transaction([
+      prisma.user.count({ where: activeCatererWhere }),
+      prisma.user.findMany({
+        where: {
+          ...notifiableCatererWhere,
+          deviceToken: { not: null },
+        },
+        select: { id: true, deviceToken: true },
+      }),
+    ]);
 
+    const tokens = eligibleUsers
+      .map((u) => u.deviceToken)
+      .filter(Boolean);
+
+    const tokensCount = tokens.length;
+
+    // Log first so the record exists even if push delivery partially fails.
     const row = await prisma.notificationLog.create({
       data: {
         title,
@@ -116,21 +137,49 @@ exports.sendNotification = async (req, res) => {
 
     logActivity({
       type: "notification",
-      message: `Broadcast "${title}" to ${sentCount} user(s)`,
+      message: `Broadcast "${title}" to ${sentCount} caterer(s), ${tokensCount} device token(s)`,
       actorUserId: req.user?.userId ?? null,
       meta: { sent_count: sentCount, tokens_count: tokensCount },
     });
 
-    // Push delivery is not wired in the API yet; mobile uses FCM tokens stored on the User row.
+    // Persist a UserNotification row for every eligible user and send push in background.
+    if (tokensCount > 0) {
+      const notifData = { screen: "notification_detail", notificationLogId: row.id };
+
+      // Save inbox records for each recipient
+      prisma.userNotification.createMany({
+        data: eligibleUsers.map((u) => ({
+          userId: u.id,
+          title,
+          body: message,
+          type: "admin_broadcast",
+          data: notifData,
+        })),
+      }).catch((err) => console.error("[UserNotification] createMany failed:", err.message));
+
+      sendPushNotifications(tokens, {
+        title,
+        body: message,
+        data: notifData,
+      }).then(({ successCount, errorCount, skippedCount }) => {
+        console.log(
+          `[ExpoPush] Broadcast "${title}": sent=${successCount} errors=${errorCount} skipped=${skippedCount}`,
+        );
+      }).catch((err) => {
+        console.error("[ExpoPush] Broadcast failed:", err.message);
+      });
+    }
+
+    const deliveryNote = tokensCount > 0
+      ? `Sending to ${tokensCount} device(s). Delivery is in progress.`
+      : "No active device tokens found. Notification logged for audit.";
+
     return successResponse(
       res,
-      "Notification logged",
+      deliveryNote,
       {
         notification: formatNotificationLog(row),
-        delivery_note:
-          tokensCount > 0
-            ? "Logged for audit. Configure Firebase Admin on the server to deliver pushes."
-            : "Logged for audit. No active FCM tokens found for caterer accounts.",
+        delivery_note: deliveryNote,
       },
       201,
     );

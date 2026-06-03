@@ -152,6 +152,7 @@ model User {
   contactMessages   ContactMessage[]
   accessCodesAssigned AccessCode[] @relation("AccessCodeAssignedUser")
   notificationLogsCreated NotificationLog[] @relation("NotificationLogCreator")
+  userNotifications UserNotification[]
 }
 
 /// Admin-generated subscription access codes (6-digit) for caterer onboarding.
@@ -169,6 +170,22 @@ model AccessCode {
   @@index([status])
   @@index([planType])
   @@index([assignedUserId])
+}
+
+/// Per-user notification inbox — stores every push sent to a caterer.
+model UserNotification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String   @db.Text
+  type      String   // "event_reminder" | "admin_broadcast"
+  data      Json?    // { bookingId?, bookingEventId?, notificationLogId? }
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, isRead])
 }
 
 /// Admin broadcast notifications — log of title/message and audience size.
