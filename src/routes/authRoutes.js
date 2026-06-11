@@ -14,6 +14,7 @@ const {
   deleteUser,
   updateDevice,
   updateNotificationPreference,
+  updateNotificationSettings,
 } = require("../controllers/authController");
 const authMiddleware = require("../middleware/authMiddleware");
 const { uploadProfileImage } = require("../controllers/uploadController");
@@ -29,6 +30,7 @@ router.post("/v1/new-password", newPassword);
 router.post("/v1/signout", authMiddleware, signOut);
 router.patch("/v1/device", authMiddleware, updateDevice);
 router.patch("/v1/user/notification", authMiddleware, updateNotificationPreference);
+router.patch("/v1/user/notification-update", authMiddleware, updateNotificationSettings);
 router.post("/v1/upload-profile-image", authMiddleware, uploadProfileImage);
 router.patch("/v1/user/profile", authMiddleware, updateUserProfile);
 router.post("/v1/delete-user", deleteUser);

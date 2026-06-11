@@ -329,8 +329,11 @@ exports.registerBusiness = async (req, res) => {
       return errorResponse(res, "Server error", 500, "ERROR");
     }
 
+    // Preserve sessionVersion so the issued token passes the single-device check
+    // in authMiddleware. Omitting it makes decoded.sessionVersion === undefined,
+    // which never matches the DB integer and instantly triggers SESSION_DISPLACED.
     const token = jwt.sign(
-      { userId, businessId: fullBusiness.id, role: user.role },
+      { userId, businessId: fullBusiness.id, role: user.role, sessionVersion: req.user.sessionVersion },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );

@@ -956,5 +956,56 @@ exports.updateNotificationPreference = async (req, res) => {
   }
 };
 
+exports.updateNotificationSettings = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { notification_status, device_token } = req.body;
+
+    if (notification_status === undefined && device_token === undefined) {
+      return errorResponse(
+        res,
+        "At least one of notification_status or device_token is required",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    if (
+      notification_status !== undefined &&
+      notification_status !== 0 &&
+      notification_status !== 1
+    ) {
+      return errorResponse(
+        res,
+        "notification_status must be 0 or 1",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const data = {};
+    if (notification_status !== undefined) data.notificationStatus = notification_status;
+    if (device_token !== undefined) data.deviceToken = device_token ?? null;
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data,
+    });
+
+    return successResponse(
+      res,
+      "Notification settings updated",
+      {
+        notification_status: updated.notificationStatus,
+        device_token: updated.deviceToken,
+      },
+      200,
+    );
+  } catch (error) {
+    console.error("updateNotificationSettings error:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
 exports.formatBusinessDetail = formatBusinessDetail;
 exports.loadBusinessDetailsArray = loadBusinessDetailsArray;
