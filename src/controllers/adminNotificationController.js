@@ -3,11 +3,14 @@ const { successResponse, errorResponse } = require("../utils/response");
 const { logActivity } = require("../utils/activityLog");
 const { sendPushNotifications } = require("../utils/expoPush");
 
+const VALID_PRIORITIES = new Set(["normal", "important", "critical"]);
+
 function formatNotificationLog(row) {
   return {
     id: row.id,
     title: row.title,
     message: row.message,
+    priority: row.priority ?? "normal",
     sent_to: row.sentTo,
     sent_count: row.sentCount,
     tokens_count: row.tokensCount,
@@ -91,6 +94,8 @@ exports.sendNotification = async (req, res) => {
   try {
     const title = String(req.body?.title ?? "").trim();
     const message = String(req.body?.message ?? "").trim();
+    const rawPriority = String(req.body?.priority ?? "normal").trim().toLowerCase();
+    const priority = VALID_PRIORITIES.has(rawPriority) ? rawPriority : "normal";
 
     if (!title) {
       return errorResponse(res, "Title is required", 422, "VALIDATION_ERROR");
@@ -125,6 +130,7 @@ exports.sendNotification = async (req, res) => {
       data: {
         title,
         message,
+        priority,
         sentTo: "all-users",
         sentCount,
         tokensCount,
@@ -142,32 +148,39 @@ exports.sendNotification = async (req, res) => {
       meta: { sent_count: sentCount, tokens_count: tokensCount },
     });
 
-    // Persist a UserNotification row for every eligible user and send push in background.
+    // Persist inbox records then send push in background.
+    // createMany is awaited before push so inbox records exist when the
+    // user taps the notification banner and the app opens.
     if (tokensCount > 0) {
       const notifData = { screen: "notification_detail", notificationLogId: row.id };
 
-      // Save inbox records for each recipient
-      prisma.userNotification.createMany({
-        data: eligibleUsers.map((u) => ({
-          userId: u.id,
-          title,
-          body: message,
-          type: "admin_broadcast",
-          data: notifData,
-        })),
-      }).catch((err) => console.error("[UserNotification] createMany failed:", err.message));
-
-      sendPushNotifications(tokens, {
-        title,
-        body: message,
-        data: notifData,
-      }).then(({ successCount, errorCount, skippedCount }) => {
-        console.log(
-          `[ExpoPush] Broadcast "${title}": sent=${successCount} errors=${errorCount} skipped=${skippedCount}`,
-        );
-      }).catch((err) => {
-        console.error("[ExpoPush] Broadcast failed:", err.message);
-      });
+      Promise.resolve()
+        .then(() =>
+          prisma.userNotification.createMany({
+            data: eligibleUsers.map((u) => ({
+              userId: u.id,
+              title,
+              body: message,
+              type: "admin_broadcast",
+              data: notifData,
+            })),
+          }),
+        )
+        .then(() =>
+          sendPushNotifications(
+            tokens,
+            { title, body: message, data: notifData },
+            { priority: priority === "normal" ? "default" : "high" },
+          ),
+        )
+        .then(({ successCount, errorCount, skippedCount }) => {
+          console.log(
+            `[ExpoPush] Broadcast "${title}": sent=${successCount} errors=${errorCount} skipped=${skippedCount}`,
+          );
+        })
+        .catch((err) => {
+          console.error("[ExpoPush/Inbox] Broadcast pipeline failed:", err.message);
+        });
     }
 
     const deliveryNote = tokensCount > 0

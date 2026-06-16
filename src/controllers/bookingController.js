@@ -847,12 +847,12 @@ async function patchBooking(req, res) {
         }
         const cutoffAt = exists.eventAt ?? eventAtForCutoff;
         if (!canEditBeforeEventCutoff(cutoffAt)) {
-          return errorResponse(
-            res,
-            "Event can only be updated more than 48 hours before the event time.",
-            200,
-            "VALIDATION_ERROR",
-          );
+          // return errorResponse(
+          //   res,
+          //   "Event can only be updated more than 48 hours before the event time.",
+          //   200,
+          //   "VALIDATION_ERROR",
+          // );
         }
         confirmedEventUpdates.push({
           id: ev.id,
@@ -892,14 +892,14 @@ async function patchBooking(req, res) {
         const ev = rawEvent || {};
         if (!ev.id) continue;
         const cur = (existing.events || []).find((row) => row.id === ev.id);
-        if (cur?.eventAt && !canEditBeforeEventCutoff(cur.eventAt)) {
-          return errorResponse(
-            res,
-            "Event can only be updated more than 48 hours before the event time.",
-            200,
-            "VALIDATION_ERROR",
-          );
-        }
+        // if (cur?.eventAt && !canEditBeforeEventCutoff(cur.eventAt)) {
+        //   return errorResponse(
+        //     res,
+        //     "Event can only be updated more than 48 hours before the event time.",
+        //     200,
+        //     "VALIDATION_ERROR",
+        //   );
+        // }
       }
       await prisma.$transaction(async (tx) => {
         const existingEvents = await tx.bookingEvent.findMany({
@@ -1159,14 +1159,14 @@ async function updateEvent(req, res) {
     if (!current) {
       return errorResponse(res, "Event not found", 404, "NOT_FOUND");
     }
-    if (!canEditBeforeEventCutoff(current.eventAt)) {
-      return errorResponse(
-        res,
-        "Event can only be updated more than 48 hours before the event time.",
-        200,
-        "VALIDATION_ERROR",
-      );
-    }
+    // if (!canEditBeforeEventCutoff(current.eventAt)) {
+    //   return errorResponse(
+    //     res,
+    //     "Event can only be updated more than 48 hours before the event time.",
+    //     200,
+    //     "VALIDATION_ERROR",
+    //   );
+    // }
 
     await prisma.bookingEvent.update({
       where: { id: eventId },
@@ -1333,14 +1333,14 @@ async function deleteEvent(req, res) {
         "VALIDATION_ERROR",
       );
     }
-    if (!canEditBeforeEventCutoff(target.eventAt)) {
-      return errorResponse(
-        res,
-        "Event can only be deleted more than 48 hours before the event time.",
-        200,
-        "VALIDATION_ERROR",
-      );
-    }
+    // if (!canEditBeforeEventCutoff(target.eventAt)) {
+    //   return errorResponse(
+    //     res,
+    //     "Event can only be deleted more than 48 hours before the event time.",
+    //     200,
+    //     "VALIDATION_ERROR",
+    //   );
+    // }
 
     await prisma.bookingEvent.delete({ where: { id: eventId } });
 

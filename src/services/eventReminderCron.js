@@ -1,152 +1,64 @@
-const cron = require("node-cron");
-const prisma = require("../config/prisma");
-const { sendPushNotifications } = require("../utils/expoPush");
-
 /**
- * Formats a UTC date into a human-readable IST string.
- * Example: "Wednesday, 5 June 2026 at 04:00 PM"
- */
-function formatEventDate(date) {
-  return new Intl.DateTimeFormat("en-IN", {
-    timeZone: "Asia/Kolkata",
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-  }).format(new Date(date));
-}
-
-/**
- * Finds all BookingEvents starting 48–49 hours from now and sends
- * a reminder notification to each eligible business user.
+ * Event Reminder Cron
  *
- * Runs every hour. The 1-hour window ensures each event is notified
- * exactly once without needing a separate "sent" flag.
+ * Fires every 15 minutes — cron expression: "* /15 * * * *" (no space).
+ * Delegates to reminderService which handles the windowed query, push delivery,
+ * and EventReminder dedup record insertion.
+ *
+ * MVP: only 24_HOUR is active.
+ * Phase 2: un-comment 2_HOUR and 30_MINUTE when ready.
+ *
+ * Single-instance re-entry protection:
+ *   `_isRunning` prevents a second cron tick from starting while the previous
+ *   run is still in progress (e.g. slow DB or many events).
+ *
+ * Multi-instance (horizontal scale):
+ *   Replace the `_isRunning` flag with a distributed lock — e.g. Redis SETNX
+ *   with a 14-minute TTL keyed on `katmitra:reminder:lock:{reminderType}`.
  */
-async function sendEventReminders() {
-  const now = new Date();
-  const windowStart = new Date(now.getTime() + 48 * 60 * 60 * 1000);
-  const windowEnd = new Date(now.getTime() + 49 * 60 * 60 * 1000);
 
-  let events;
+const cron = require("node-cron");
+const { processReminderType } = require("./reminderService");
+
+const ACTIVE_REMINDER_TYPES = [
+  "24_HOUR",
+  // "2_HOUR",     // Phase 2
+  // "30_MINUTE",  // Phase 2
+];
+
+let _isRunning = false;
+
+async function runReminders() {
+  if (_isRunning) {
+    console.warn("[EventReminder] Previous run still in progress — skipping this tick.");
+    return;
+  }
+
+  _isRunning = true;
+  const start = Date.now();
+  console.log("[EventReminder] Cron triggered at", new Date().toISOString());
+
   try {
-    events = await prisma.bookingEvent.findMany({
-      where: {
-        eventAt: {
-          gte: windowStart,
-          lt: windowEnd,
-        },
-        status: { not: "COMPLETED" },
-        booking: {
-          status: { not: "CANCELLED" },
-        },
-      },
-      select: {
-        id: true,
-        eventAt: true,
-        eventLocation: true,
-        functionType: true,
-        guestCount: true,
-        booking: {
-          select: {
-            id: true,
-            customerName: true,
-            business: {
-              select: {
-                users: {
-                  where: {
-                    notificationStatus: 1,
-                    deviceToken: { not: null },
-                    deletedAt: null,
-                  },
-                  select: {
-                    id: true,
-                    deviceToken: true,
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    });
+    for (const type of ACTIVE_REMINDER_TYPES) {
+      const stats = await processReminderType(type);
+      if (stats.processed > 0) {
+        console.log(
+          `[EventReminder:${type}] processed=${stats.processed} ` +
+          `notified=${stats.notified} failed=${stats.failed} skipped=${stats.skipped}`,
+        );
+      }
+    }
   } catch (err) {
-    console.error("[EventReminder] DB query failed:", err.message);
-    return;
-  }
-
-  if (events.length === 0) {
-    console.log("[EventReminder] No events in 48-49h window.");
-    return;
-  }
-
-  console.log(`[EventReminder] Found ${events.length} event(s) to notify.`);
-
-  for (const event of events) {
-    const tokens = event.booking.business.users
-      .map((u) => u.deviceToken)
-      .filter(Boolean);
-    const userIds = event.booking.business.users
-      .map((u) => u.id)
-      .filter(Boolean);
-
-    if (tokens.length === 0) continue;
-
-    const dateStr = event.eventAt ? formatEventDate(event.eventAt) : "your upcoming event";
-    const eventType = event.functionType || "Event";
-    const customer = event.booking.customerName ? ` for ${event.booking.customerName}` : "";
-    const location = event.eventLocation ? ` at ${event.eventLocation}` : "";
-    const guests = event.guestCount ? ` (${event.guestCount} guests)` : "";
-
-    const title = "Event Reminder - 48 Hours to Go";
-    const body = `Your ${eventType}${customer} is on ${dateStr}${location}${guests}. Start your preparations!`;
-
-    const notifData = {
-      screen: "bookingDetails",
-      bookingId: event.booking.id,
-      bookingEventId: event.id,
-    };
-
-    try {
-      await prisma.userNotification.createMany({
-        data: userIds.map((userId) => ({
-          userId,
-          title,
-          body,
-          type: "event_reminder",
-          data: notifData,
-        })),
-        skipDuplicates: true,
-      });
-    } catch (err) {
-      console.error(`[EventReminder] UserNotification save failed for event ${event.id}:`, err.message);
-    }
-
-    try {
-      const result = await sendPushNotifications(tokens, { title, body, data: notifData });
-      console.log(
-        `[EventReminder] Event ${event.id} — sent: ${result.successCount}, errors: ${result.errorCount}, skipped: ${result.skippedCount}`,
-      );
-    } catch (err) {
-      console.error(`[EventReminder] Push failed for event ${event.id}:`, err.message);
-    }
+    console.error("[EventReminder] Unexpected error in cron run:", err.message);
+  } finally {
+    _isRunning = false;
+    console.log(`[EventReminder] Run completed in ${Date.now() - start}ms`);
   }
 }
 
-/**
- * Starts the hourly cron job.
- * Called once from server.js at startup.
- */
 function startEventReminderCron() {
-  // Runs at the top of every hour: 0 * * * *
-  cron.schedule("0 * * * *", () => {
-    console.log("[EventReminder] Cron triggered at", new Date().toISOString());
-    void sendEventReminders();
-  });
-  console.log("[EventReminder] Hourly reminder cron started.");
+  cron.schedule("*/15 * * * *", () => { void runReminders(); });
+  console.log("[EventReminder] 15-minute reminder cron started.");
 }
 
-module.exports = { startEventReminderCron, sendEventReminders };
+module.exports = { startEventReminderCron, runReminders };

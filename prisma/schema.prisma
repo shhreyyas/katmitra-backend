@@ -174,15 +174,16 @@ model AccessCode {
 
 /// Per-user notification inbox — stores every push sent to a caterer.
 model UserNotification {
-  id        String   @id @default(uuid())
+  id        String    @id @default(uuid())
   userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   title     String
-  body      String   @db.Text
-  type      String   // "event_reminder" | "admin_broadcast"
-  data      Json?    // { bookingId?, bookingEventId?, notificationLogId? }
-  isRead    Boolean  @default(false)
-  createdAt DateTime @default(now())
+  body      String    @db.Text
+  type      String    // "event_reminder" | "admin_broadcast"
+  data      Json?     // { bookingId?, bookingEventId?, notificationLogId? }
+  isRead    Boolean   @default(false)
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([userId, isRead])
@@ -193,6 +194,7 @@ model NotificationLog {
   id              String   @id @default(uuid())
   title           String
   message         String   @db.Text
+  priority        String   @default("normal")
   sentTo          String   @default("all-users")
   sentCount       Int      @default(0)
   tokensCount     Int      @default(0)
@@ -450,9 +452,27 @@ model BookingEvent {
   supplySavedLists SupplySavedList[]
   staffAssignments EventStaff[]
   extraServiceLines BookingExtraServiceLine[]
+  eventReminders EventReminder[]
 
   @@index([bookingId])
   @@index([bookingId, eventAt])
+  @@index([eventAt])
+}
+
+/// Tracks which reminder notifications have been sent per booking event.
+/// @@unique([bookingEventId, reminderType]) is the primary dedup guard —
+/// only one reminder of each type can ever be inserted per event.
+model EventReminder {
+  id             String       @id @default(uuid())
+  bookingEventId String
+  bookingEvent   BookingEvent @relation(fields: [bookingEventId], references: [id], onDelete: Cascade)
+  reminderType   String       // "24_HOUR" | "2_HOUR" | "30_MINUTE"
+  sentAt         DateTime     @default(now())
+  createdAt      DateTime     @default(now())
+
+  @@unique([bookingEventId, reminderType])
+  @@index([bookingEventId])
+  @@index([reminderType, sentAt])
 }
 
 model BookingMenuItem {

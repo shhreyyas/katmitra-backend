@@ -59,6 +59,9 @@ app.use("/api", staffRoutes);
 const extraServiceRoutes = require("./routes/extraServiceRoutes");
 app.use("/api", extraServiceRoutes);
 
+const notificationRoutes = require("./routes/notificationRoutes");
+app.use("/api", notificationRoutes);
+
 const adminRoutes = require("./routes/adminRoutes");
 app.use("/api", adminRoutes);
 

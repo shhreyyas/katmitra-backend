@@ -9,6 +9,7 @@ function formatNotification(row) {
     type: row.type,
     data: row.data ?? {},
     is_read: row.isRead,
+    read_at: row.readAt ? row.readAt.toISOString() : null,
     created_at: row.createdAt.toISOString(),
   };
 }
@@ -82,7 +83,7 @@ exports.markAsRead = async (req, res) => {
     if (!notification.isRead) {
       await prisma.userNotification.update({
         where: { id },
-        data: { isRead: true },
+        data: { isRead: true, readAt: new Date() },
       });
     }
 
@@ -99,7 +100,7 @@ exports.markAllAsRead = async (req, res) => {
     const userId = req.user.userId;
     await prisma.userNotification.updateMany({
       where: { userId, isRead: false },
-      data: { isRead: true },
+      data: { isRead: true, readAt: new Date() },
     });
     return successResponse(res, "All notifications marked as read");
   } catch (error) {
