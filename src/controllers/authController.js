@@ -365,18 +365,20 @@ exports.signIn = async (req, res) => {
         console.error("Login OTP email failed:", emailErr.message);
       });
 
-      // Increment sessionVersion to invalidate any existing session on another device,
-      // then update notificationStatus — both in one write.
+      // Merge session + device writes into one round-trip, load business in parallel.
       const notificationStatusUnverified = notificationStatusFromDeviceToken(device_token);
-      const updatedUnverified = await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          notificationStatus: notificationStatusUnverified,
-          sessionVersion: { increment: 1 },
-        },
-      });
-
-      await setUserDevice(user.id, device_type, device_token);
+      const [updatedUnverified, unverifiedBusinessDetails] = await Promise.all([
+        prisma.user.update({
+          where: { id: user.id },
+          data: {
+            notificationStatus: notificationStatusUnverified,
+            sessionVersion: { increment: 1 },
+            deviceToken: device_type !== undefined ? (device_token ?? null) : undefined,
+            deviceType: device_type !== undefined ? device_type : undefined,
+          },
+        }),
+        loadBusinessDetailsArray(user.businessId),
+      ]);
 
       const token = jwt.sign(
         {
@@ -393,7 +395,7 @@ exports.signIn = async (req, res) => {
         status: 1,
         device_type,
         device_token: device_token || null,
-        business_details: await loadBusinessDetailsArray(user.businessId),
+        business_details: unverifiedBusinessDetails,
       });
 
       return res.status(200).json({
@@ -406,17 +408,21 @@ exports.signIn = async (req, res) => {
       });
     }
 
-    // Increment sessionVersion to kick out any active session on another device.
+    // Merge the two writes (session + device) into one round-trip, and run the
+    // business lookup in parallel — cuts 2 sequential DB calls down to 1.
     const notificationStatus = notificationStatusFromDeviceToken(device_token);
-    const updatedUser = await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        notificationStatus,
-        sessionVersion: { increment: 1 },
-      },
-    });
-
-    await setUserDevice(updatedUser.id, device_type, device_token);
+    const [updatedUser, business_details] = await Promise.all([
+      prisma.user.update({
+        where: { id: user.id },
+        data: {
+          notificationStatus,
+          sessionVersion: { increment: 1 },
+          deviceToken: device_type !== undefined ? (device_token ?? null) : undefined,
+          deviceType: device_type !== undefined ? device_type : undefined,
+        },
+      }),
+      loadBusinessDetailsArray(user.businessId),
+    ]);
 
     const token = jwt.sign(
       {
@@ -428,8 +434,6 @@ exports.signIn = async (req, res) => {
       process.env.JWT_SECRET,
       {},
     );
-
-    const business_details = await loadBusinessDetailsArray(updatedUser.businessId);
 
     const formattedUser = formatUserResponse(updatedUser, {
       status: 1,
@@ -948,6 +952,57 @@ exports.updateNotificationPreference = async (req, res) => {
     );
   } catch (error) {
     console.error("updateNotificationPreference error:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+exports.updateNotificationSettings = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { notification_status, device_token } = req.body;
+
+    if (notification_status === undefined && device_token === undefined) {
+      return errorResponse(
+        res,
+        "At least one of notification_status or device_token is required",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    if (
+      notification_status !== undefined &&
+      notification_status !== 0 &&
+      notification_status !== 1
+    ) {
+      return errorResponse(
+        res,
+        "notification_status must be 0 or 1",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const data = {};
+    if (notification_status !== undefined) data.notificationStatus = notification_status;
+    if (device_token !== undefined) data.deviceToken = device_token ?? null;
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data,
+    });
+
+    return successResponse(
+      res,
+      "Notification settings updated",
+      {
+        notification_status: updated.notificationStatus,
+        device_token: updated.deviceToken,
+      },
+      200,
+    );
+  } catch (error) {
+    console.error("updateNotificationSettings error:", error.message);
     return errorResponse(res, "Server error", 500, "ERROR");
   }
 };

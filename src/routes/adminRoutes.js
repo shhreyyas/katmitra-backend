@@ -97,6 +97,11 @@ const {
   updateSettings,
 } = require("../controllers/adminSettingsController");
 const { listLogs } = require("../controllers/adminLogsController");
+const {
+  listEventReminders,
+  triggerCron,
+  testEventReminder,
+} = require("../controllers/adminReminderController");
 
 router.get("/admin/v1/dashboard", authMiddleware, adminMiddleware, getDashboard);
 router.get(
@@ -431,5 +436,9 @@ router.put(
 );
 
 router.get("/admin/v1/logs", authMiddleware, adminMiddleware, listLogs);
+
+router.get("/admin/v1/reminders", authMiddleware, adminMiddleware, listEventReminders);
+router.post("/admin/v1/reminders/trigger", authMiddleware, adminMiddleware, triggerCron);
+router.post("/admin/v1/reminders/test/:bookingEventId", authMiddleware, adminMiddleware, testEventReminder);
 
 module.exports = router;

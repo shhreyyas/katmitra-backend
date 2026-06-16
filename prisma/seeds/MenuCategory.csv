@@ -1,0 +1,7 @@
+name,slug,sortOrder,isActive
+"{""en"":""Starter"",""hi"":""स्टार्टर"",""gu"":""સ્ટાર્ટર""}",starter,1,true
+"{""en"":""Main Course"",""hi"":""मुख्य भोजन"",""gu"":""મેઇન કોર્સ""}",main-course,2,true
+"{""en"":""Bread"",""hi"":""रोटी"",""gu"":""રોટલી""}",bread,3,true
+"{""en"":""Rice"",""hi"":""चावल"",""gu"":""ચોખા""}",rice,4,true
+"{""en"":""Dessert"",""hi"":""मिठाई"",""gu"":""મીઠાઈ""}",dessert,5,true
+"{""en"":""Beverage"",""hi"":""पेय"",""gu"":""પીણું""}",beverage,6,true
