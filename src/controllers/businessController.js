@@ -13,6 +13,7 @@ const {
   resolveLocalizedName,
 } = require("../utils/localization");
 const { uploadBase64ToBucket } = require("../utils/uploadBase64Image");
+const { sendPushNotifications } = require("../utils/expoPush");
 
 const TRIAL_DAYS = 30;
 const BUSINESS_LOGO_BUCKET = "business_profile_pictures";
@@ -354,6 +355,28 @@ exports.registerBusiness = async (req, res) => {
       device_token: user.deviceToken ?? null,
       business_details,
     });
+
+    // Fire welcome notification in background — non-blocking so response is not delayed.
+    const _wUserId = userId;
+    const _wToken  = user.deviceToken;
+    const _wNotif  = user.notificationStatus;
+    Promise.resolve()
+      .then(async () => {
+        const title = "Business created! 🎉";
+        const body  = "You're all set. Create your first booking and start managing events.";
+        const data  = { screen: "newBooking" };
+
+        await prisma.userNotification.create({
+          data: { userId: _wUserId, title, body, type: "business_welcome", data },
+        });
+
+        if (_wToken && _wNotif === 1) {
+          await sendPushNotifications([_wToken], { title, body, data });
+        }
+      })
+      .catch((err) =>
+        console.error("[WelcomeNotif] Failed for user", _wUserId, ":", err.message),
+      );
 
     return successResponse(
       res,

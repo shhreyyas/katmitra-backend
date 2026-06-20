@@ -19,6 +19,12 @@
 
 const cron = require("node-cron");
 const { processReminderType } = require("./reminderService");
+const { processBusinessSetupReminder } = require("./onboardingReminderService");
+const { processBookingNoEventsReminder } = require("./bookingEventReminderService");
+const { processEventNoMenuReminder } = require("./eventMenuReminderService");
+const { processPaymentPendingReminder } = require("./paymentPendingReminderService");
+const { processQuotationExpiringReminder, processQuotationExpiredReminder } = require("./quotationReminderService");
+const { processDraftBookingExpiringReminder, processDraftBookingExpiredReminder } = require("./draftBookingReminderService");
 
 const ACTIVE_REMINDER_TYPES = [
   "24_HOUR",
@@ -47,6 +53,57 @@ async function runReminders() {
           `notified=${stats.notified} failed=${stats.failed} skipped=${stats.skipped}`,
         );
       }
+    }
+    const onboardingStats = await processBusinessSetupReminder();
+    if (onboardingStats.notified > 0 || onboardingStats.failed > 0) {
+      console.log(
+        `[OnboardingReminder] notified=${onboardingStats.notified} ` +
+        `failed=${onboardingStats.failed} skipped=${onboardingStats.skipped}`,
+      );
+    }
+
+    const bookingStats = await processBookingNoEventsReminder();
+    if (bookingStats.notified > 0 || bookingStats.failed > 0) {
+      console.log(
+        `[BookingNoEvents] notified=${bookingStats.notified} ` +
+        `failed=${bookingStats.failed} skipped=${bookingStats.skipped}`,
+      );
+    }
+
+    const menuStats = await processEventNoMenuReminder();
+    if (menuStats.notified > 0 || menuStats.failed > 0) {
+      console.log(
+        `[EventNoMenu] notified=${menuStats.notified} ` +
+        `failed=${menuStats.failed} skipped=${menuStats.skipped}`,
+      );
+    }
+
+    const paymentStats = await processPaymentPendingReminder();
+    if (paymentStats.notified > 0 || paymentStats.failed > 0) {
+      console.log(
+        `[PaymentPending] notified=${paymentStats.notified} ` +
+        `failed=${paymentStats.failed} skipped=${paymentStats.skipped}`,
+      );
+    }
+
+    const qExpiring = await processQuotationExpiringReminder();
+    if (qExpiring.notified > 0 || qExpiring.failed > 0) {
+      console.log(`[QuotationReminder:expiring_3d] notified=${qExpiring.notified} failed=${qExpiring.failed} skipped=${qExpiring.skipped}`);
+    }
+
+    const qExpired = await processQuotationExpiredReminder();
+    if (qExpired.notified > 0 || qExpired.failed > 0) {
+      console.log(`[QuotationReminder:expired_1d] notified=${qExpired.notified} failed=${qExpired.failed} skipped=${qExpired.skipped}`);
+    }
+
+    const dExpiring = await processDraftBookingExpiringReminder();
+    if (dExpiring.notified > 0 || dExpiring.failed > 0) {
+      console.log(`[DraftReminder:draft_expiring_3d] notified=${dExpiring.notified} failed=${dExpiring.failed} skipped=${dExpiring.skipped}`);
+    }
+
+    const dExpired = await processDraftBookingExpiredReminder();
+    if (dExpired.notified > 0 || dExpired.failed > 0) {
+      console.log(`[DraftReminder:draft_expired_1d] notified=${dExpired.notified} failed=${dExpired.failed} skipped=${dExpired.skipped}`);
     }
   } catch (err) {
     console.error("[EventReminder] Unexpected error in cron run:", err.message);
