@@ -1333,14 +1333,14 @@ async function deleteEvent(req, res) {
         "VALIDATION_ERROR",
       );
     }
-    // if (!canEditBeforeEventCutoff(target.eventAt)) {
-    //   return errorResponse(
-    //     res,
-    //     "Event can only be deleted more than 48 hours before the event time.",
-    //     200,
-    //     "VALIDATION_ERROR",
-    //   );
-    // }
+    if (!canEditBeforeEventCutoff(target.eventAt)) {
+      return errorResponse(
+        res,
+        "Event can only be deleted more than 48 hours before the event time.",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
 
     await prisma.bookingEvent.delete({ where: { id: eventId } });
 

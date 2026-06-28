@@ -153,6 +153,7 @@ model User {
   accessCodesAssigned AccessCode[] @relation("AccessCodeAssignedUser")
   notificationLogsCreated NotificationLog[] @relation("NotificationLogCreator")
   userNotifications UserNotification[]
+  onboardingReminders OnboardingReminder[]
 }
 
 /// Admin-generated subscription access codes (6-digit) for caterer onboarding.
@@ -416,6 +417,7 @@ model Booking {
   payments  PaymentTransaction[]
   events    BookingEvent[]
   extraServiceLines BookingExtraServiceLine[]
+  bookingReminders  BookingReminder[]
 
   /// Set when the caterer marks the booking as completed in the app (dashboard / history).
   completedAt DateTime?
@@ -660,7 +662,8 @@ model Quotation {
   /// Agreed per-guest menu bundle (custom or predefined); null when only per-line catalog snapshots apply.
   platePrice Decimal? @db.Decimal(12, 2)
 
-  menuItems QuotationMenuItem[]
+  menuItems          QuotationMenuItem[]
+  quotationReminders QuotationReminder[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -809,4 +812,40 @@ model BookingExtraServiceLine {
   @@index([bookingId])
   @@index([bookingId, eventId])
   @@index([extraServiceId])
+}
+
+model OnboardingReminder {
+  id           String   @id @default(uuid())
+  userId       String
+  reminderType String
+  sentAt       DateTime @default(now())
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, reminderType])
+  @@index([userId])
+}
+
+model BookingReminder {
+  id           String   @id @default(uuid())
+  bookingId    String
+  reminderType String
+  sentAt       DateTime @default(now())
+  createdAt    DateTime @default(now())
+  booking      Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@unique([bookingId, reminderType])
+  @@index([bookingId])
+}
+
+model QuotationReminder {
+  id           String    @id @default(uuid())
+  quotationId  String
+  reminderType String
+  sentAt       DateTime  @default(now())
+  createdAt    DateTime  @default(now())
+  quotation    Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+
+  @@unique([quotationId, reminderType])
+  @@index([quotationId])
 }
