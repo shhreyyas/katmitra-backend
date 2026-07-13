@@ -1,6 +1,6 @@
 const prisma = require("../config/prisma");
 const { successResponse, errorResponse } = require("../utils/response");
-const { sendContactInquiryEmail } = require("../utils/email");
+const { sendContactInquiryEmail, sendContactConfirmationEmail } = require("../utils/email");
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -12,20 +12,40 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 exports.submitContact = async (req, res) => {
   try {
     const userId = req.user?.userId;
-    const { email, customer_name, phone, description } = req.body;
+    const { email, customer_name, phone, business_name, address, description } = req.body;
 
     const emailTrim = typeof email === "string" ? email.trim() : "";
     const nameTrim =
       typeof customer_name === "string" ? customer_name.trim() : "";
     const phoneDigits =
       typeof phone === "string" ? phone.replace(/\D/g, "").slice(0, 10) : "";
+    const businessNameTrim =
+      typeof business_name === "string" ? business_name.trim() : "";
+    const addressTrim =
+      typeof address === "string" ? address.trim() : "";
     const descTrim =
       typeof description === "string" ? description.trim() : "";
 
-    if (!emailTrim || !nameTrim || !phoneDigits || !descTrim) {
+    if (!nameTrim) {
       return errorResponse(
         res,
-        "Email, name, phone, and description are required",
+        "Name is required",
+        422,
+        "VALIDATION_ERROR",
+      );
+    }
+    if (nameTrim.length < 2) {
+      return errorResponse(
+        res,
+        "Name must be at least 2 characters",
+        422,
+        "VALIDATION_ERROR",
+      );
+    }
+    if (!phoneDigits) {
+      return errorResponse(
+        res,
+        "Phone number is required",
         422,
         "VALIDATION_ERROR",
       );
@@ -38,21 +58,26 @@ exports.submitContact = async (req, res) => {
         "VALIDATION_ERROR",
       );
     }
-    if (!EMAIL_RE.test(emailTrim)) {
-      return errorResponse(res, "Invalid email address", 422, "VALIDATION_ERROR");
-    }
-    if (nameTrim.length < 2) {
+    if (!businessNameTrim) {
       return errorResponse(
         res,
-        "Name must be at least 2 characters",
+        "Catering business name is required",
         422,
         "VALIDATION_ERROR",
       );
     }
-    if (descTrim.length < 10) {
+    if (businessNameTrim.length < 2) {
       return errorResponse(
         res,
-        "Description must be at least 10 characters",
+        "Catering business name must be at least 2 characters",
+        422,
+        "VALIDATION_ERROR",
+      );
+    }
+    if (emailTrim && !EMAIL_RE.test(emailTrim)) {
+      return errorResponse(
+        res,
+        "Invalid email address",
         422,
         "VALIDATION_ERROR",
       );
@@ -60,24 +85,47 @@ exports.submitContact = async (req, res) => {
 
     const createdMessage = await prisma.contactMessage.create({
       data: {
-        email: emailTrim,
+        email: emailTrim || null,
         customerName: nameTrim,
         phone: phoneDigits,
-        description: descTrim,
+        businessName: businessNameTrim,
+        address: addressTrim || null,
+        description: descTrim || null,
         userId: userId ?? null,
       },
     });
 
-    await sendContactInquiryEmail({
+    // Both emails are fire-and-forget — data is already safe in DB.
+
+    // 1. Notify the Katmitra admin team.
+    sendContactInquiryEmail({
       toEmail: "info.katmitra@gmail.com",
       inquiry: {
         email: createdMessage.email,
         customerName: createdMessage.customerName,
         phone: createdMessage.phone,
+        businessName: createdMessage.businessName,
+        address: createdMessage.address,
         description: createdMessage.description,
         createdAt: createdMessage.createdAt,
       },
-    });
+    }).catch((err) =>
+      console.error("sendContactInquiryEmail failed (non-fatal):", err.message)
+    );
+
+    // 2. Send a confirmation to the customer (only if they provided an email).
+    if (createdMessage.email) {
+      sendContactConfirmationEmail({
+        toEmail: createdMessage.email,
+        inquiry: {
+          customerName: createdMessage.customerName,
+          businessName: createdMessage.businessName,
+          phone: createdMessage.phone,
+        },
+      }).catch((err) =>
+        console.error("sendContactConfirmationEmail failed (non-fatal):", err.message)
+      );
+    }
 
     return successResponse(
       res,
