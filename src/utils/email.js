@@ -291,7 +291,7 @@ exports.sendBookingConfirmationEmail = async (toEmail, opts) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * @param {{ toEmail: string, inquiry: { email: string, customerName: string, phone: string, description: string, createdAt?: Date|string } }} payload
+ * @param {{ toEmail: string, inquiry: { email?: string|null, customerName: string, phone: string, businessName: string, address?: string|null, description?: string|null, createdAt?: Date|string } }} payload
  */
 exports.sendContactInquiryEmail = async ({ toEmail, inquiry }) => {
   const submittedAt = inquiry.createdAt
@@ -333,9 +333,9 @@ exports.sendContactInquiryEmail = async ({ toEmail, inquiry }) => {
               <!-- Contact details -->
               <table width="100%" cellpadding="0" cellspacing="0" style="border-radius: 12px; overflow: hidden; border: 1px solid #EDF2F7; margin-bottom: 24px;">
                 <tr style="background-color: #F7FAFC;">
-                  <td style="padding: 10px 16px; font-size: 11px; font-weight: 700; color: #A0AEC0; text-transform: uppercase; letter-spacing: 1.5px; width: 120px;">Email</td>
-                  <td style="padding: 10px 16px; border-left: 1px solid #EDF2F7;">
-                    <a href="mailto:${inquiry.email}" style="font-size: 14px; color: #FF6B35; text-decoration: none; font-weight: 600;">${inquiry.email}</a>
+                  <td style="padding: 10px 16px; font-size: 11px; font-weight: 700; color: #A0AEC0; text-transform: uppercase; letter-spacing: 1.5px; width: 150px;">Catering Business</td>
+                  <td style="padding: 10px 16px; border-left: 1px solid #EDF2F7; font-size: 14px; color: #2D3748; font-weight: 600;">
+                    ${inquiry.businessName}
                   </td>
                 </tr>
                 <tr style="background-color: #ffffff; border-top: 1px solid #EDF2F7;">
@@ -344,21 +344,37 @@ exports.sendContactInquiryEmail = async ({ toEmail, inquiry }) => {
                     <a href="tel:${inquiry.phone}" style="font-size: 14px; color: #2D3748; text-decoration: none; font-weight: 600;">${inquiry.phone}</a>
                   </td>
                 </tr>
+                <tr style="background-color: #F7FAFC; border-top: 1px solid #EDF2F7;">
+                  <td style="padding: 10px 16px; font-size: 11px; font-weight: 700; color: #A0AEC0; text-transform: uppercase; letter-spacing: 1.5px;">Email</td>
+                  <td style="padding: 10px 16px; border-left: 1px solid #EDF2F7;">
+                    ${inquiry.email ? `<a href="mailto:${inquiry.email}" style="font-size: 14px; color: #FF6B35; text-decoration: none; font-weight: 600;">${inquiry.email}</a>` : `<span style="font-size: 14px; color: #718096; font-style: italic;">Not Provided</span>`}
+                  </td>
+                </tr>
+                <tr style="background-color: #ffffff; border-top: 1px solid #EDF2F7;">
+                  <td style="padding: 10px 16px; font-size: 11px; font-weight: 700; color: #A0AEC0; text-transform: uppercase; letter-spacing: 1.5px;">Address</td>
+                  <td style="padding: 10px 16px; border-left: 1px solid #EDF2F7; font-size: 14px; color: #2D3748;">
+                    ${inquiry.address ? inquiry.address : `<span style="font-size: 14px; color: #718096; font-style: italic;">Not Provided</span>`}
+                  </td>
+                </tr>
               </table>
 
               <!-- Message -->
               <p style="margin: 0 0 10px 0; font-size: 11px; font-weight: 700; color: #A0AEC0; text-transform: uppercase; letter-spacing: 1.5px;">Message</p>
               <div style="background: #F7FAFC; border-radius: 10px; border: 1px solid #EDF2F7; padding: 18px 20px; margin-bottom: 32px;">
-                <p style="margin: 0; font-size: 14px; color: #2D3748; line-height: 1.8; white-space: pre-wrap;">${inquiry.description}</p>
+                <p style="margin: 0; font-size: 14px; color: #2D3748; line-height: 1.8; white-space: pre-wrap;">${inquiry.description ? inquiry.description : `<span style="color: #718096; font-style: italic;">No message provided</span>`}</p>
               </div>
 
               <!-- Reply CTA -->
               <table cellpadding="0" cellspacing="0" style="margin-bottom: 8px;">
                 <tr>
                   <td style="background: linear-gradient(135deg, #FF6B35, #F7931E); border-radius: 8px; padding: 0;">
+                    ${inquiry.email ? `
                     <a href="mailto:${inquiry.email}" style="display: inline-block; padding: 13px 28px; font-size: 14px; font-weight: 700; color: #ffffff; text-decoration: none; letter-spacing: 0.3px;">
                       Reply to ${inquiry.customerName} →
-                    </a>
+                    </a>` : `
+                    <a href="tel:${inquiry.phone}" style="display: inline-block; padding: 13px 28px; font-size: 14px; font-weight: 700; color: #ffffff; text-decoration: none; letter-spacing: 0.3px;">
+                      Call ${inquiry.customerName} →
+                    </a>`}
                   </td>
                 </tr>
               </table>
@@ -376,3 +392,101 @@ exports.sendContactInquiryEmail = async ({ toEmail, inquiry }) => {
 
   await sendEmail({ fromLabel: "Katmitra", to: toEmail, subject, html });
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Sends a "We received your inquiry" confirmation email to the customer.
+ * Only called when the customer provided their email address.
+ *
+ * @param {{ toEmail: string, inquiry: { customerName: string, businessName: string, phone: string } }} payload
+ */
+exports.sendContactConfirmationEmail = async ({ toEmail, inquiry }) => {
+  const subject = `We received your inquiry — Katmitra`;
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>${subject}</title>
+</head>
+<body style="margin:0; padding:0; background-color:#F7F8FC; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#F7F8FC; padding: 40px 16px;">
+    <tr>
+      <td align="center">
+        <table width="580" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:16px; overflow:hidden; box-shadow: 0 4px 24px rgba(0,0,0,0.08); max-width:580px;">
+
+          ${emailHeader("Smart Catering Management")}
+
+          <!-- Checkmark icon + heading -->
+          <tr>
+            <td style="padding: 44px 40px 32px 40px; text-align: center;">
+              <div style="
+                display: inline-block;
+                width: 72px; height: 72px; border-radius: 50%;
+                background: linear-gradient(135deg, #48BB78, #38A169);
+                font-size: 34px; line-height: 72px;
+                margin-bottom: 22px;
+                box-shadow: 0 4px 12px rgba(72,187,120,0.35);
+                color: #ffffff;
+              ">✓</div>
+              <h1 style="margin: 0 0 10px 0; font-size: 24px; font-weight: 800; color: #1A202C; letter-spacing: -0.3px;">
+                Inquiry Received!
+              </h1>
+              <p style="margin: 0 0 32px 0; font-size: 15px; color: #718096; line-height: 1.7; max-width: 420px; margin-left: auto; margin-right: auto;">
+                Hi <strong style="color: #2D3748;">${inquiry.customerName}</strong>, thank you for reaching out to us.
+                We have received your inquiry and our team will get back to you shortly.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Summary card -->
+          <tr>
+            <td style="padding: 0 40px 36px 40px;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="background: #F7FAFC; border-radius: 12px; border: 1px solid #EDF2F7;">
+                <tr>
+                  <td style="padding: 16px 20px; border-bottom: 1px solid #EDF2F7;">
+                    <p style="margin: 0 0 4px 0; font-size: 11px; font-weight: 700; color: #A0AEC0; text-transform: uppercase; letter-spacing: 1.5px;">Catering Business</p>
+                    <p style="margin: 0; font-size: 15px; font-weight: 700; color: #2D3748;">${inquiry.businessName}</p>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding: 16px 20px;">
+                    <p style="margin: 0 0 4px 0; font-size: 11px; font-weight: 700; color: #A0AEC0; text-transform: uppercase; letter-spacing: 1.5px;">Contact Number</p>
+                    <p style="margin: 0; font-size: 15px; font-weight: 700; color: #2D3748;">${inquiry.phone}</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- What's next banner -->
+          <tr>
+            <td style="padding: 0 40px 36px 40px;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="background: linear-gradient(135deg, #FFFBEB, #FEF3C7); border-radius: 10px; border-left: 4px solid #F59E0B;">
+                <tr>
+                  <td style="padding: 16px 18px;">
+                    <p style="margin: 0 0 6px 0; font-size: 13px; font-weight: 700; color: #92400E;">⏱️ &nbsp;What happens next?</p>
+                    <p style="margin: 0; font-size: 13px; color: #78350F; line-height: 1.6;">
+                      Our team typically responds within <strong>24 hours</strong>. In the meantime, feel free to reach us at
+                      <a href="mailto:info.katmitra@gmail.com" style="color: #FF6B35; text-decoration: none; font-weight: 600;">info.katmitra@gmail.com</a>.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          ${emailFooter()}
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  await sendEmail({ fromLabel: "Katmitra", to: toEmail, subject, html });
+};
+

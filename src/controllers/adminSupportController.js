@@ -16,7 +16,8 @@ function formatSupportMessage(row) {
     user_id: row.userId,
     user_name: user?.name ?? null,
     business_id: business?.id ?? null,
-    business_name: business?.name ?? null,
+    business_name: row.businessName ?? business?.name ?? null,
+    address: row.address ?? null,
     created_at: row.createdAt.toISOString(),
     updated_at: row.updatedAt.toISOString(),
   };
@@ -36,6 +37,8 @@ function buildSupportListWhere(query) {
         { email: { contains: q, mode: "insensitive" } },
         { customerName: { contains: q, mode: "insensitive" } },
         { phone: { contains: q } },
+        { businessName: { contains: q, mode: "insensitive" } },
+        { address: { contains: q, mode: "insensitive" } },
         { description: { contains: q, mode: "insensitive" } },
         { user: { name: { contains: q, mode: "insensitive" } } },
         { user: { business: { name: { contains: q, mode: "insensitive" } } } },

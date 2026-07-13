@@ -243,10 +243,12 @@ model AppVersionConfig {
 
 model ContactMessage {
   id           String   @id @default(uuid())
-  email        String
+  email        String?
   customerName String
   phone        String?
-  description  String
+  businessName String?
+  address      String?
+  description  String?
   status       String   @default("open")
   userId       String?
   user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
