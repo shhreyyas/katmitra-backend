@@ -415,6 +415,7 @@ exports.updateBusiness = async (req, res) => {
       business_email,
       default_service_charge_pct,
       default_tax_pct,
+      terms_and_conditions,
     } = req.body;
 
     const data = {};
@@ -458,6 +459,18 @@ exports.updateBusiness = async (req, res) => {
         );
       }
       data.defaultTaxPct = tx;
+    }
+    if (terms_and_conditions !== undefined) {
+      const trimmed = String(terms_and_conditions).trim();
+      if (trimmed.length > 4000) {
+        return errorResponse(
+          res,
+          "Terms & Conditions must be under 4000 characters",
+          200,
+          "VALIDATION_ERROR",
+        );
+      }
+      data.termsAndConditions = trimmed || null;
     }
 
     if (Object.keys(data).length === 0) {

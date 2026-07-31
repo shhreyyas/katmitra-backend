@@ -96,30 +96,8 @@ function buildQuotationScheduleWhere(businessId, { event_from, event_to, searchQ
 }
 
 const bookingListInclude = {
-  menuItems: true,
-  extraServiceLines: true,
   events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
-  payments: { orderBy: { createdAt: "desc" }, take: 5 },
 };
-
-async function fetchAllBookingsForSchedule(where) {
-  const rows = [];
-  let offset = 0;
-  const limit = 200;
-  for (let page = 0; page < 40; page++) {
-    const batch = await prisma.booking.findMany({
-      where,
-      orderBy: { createdAt: "desc" },
-      take: limit,
-      skip: offset,
-      include: bookingListInclude,
-    });
-    rows.push(...batch);
-    if (batch.length < limit) break;
-    offset += limit;
-  }
-  return rows;
-}
 
 async function fetchQuotationsForSchedule(where) {
   const rows = [];
@@ -131,7 +109,14 @@ async function fetchQuotationsForSchedule(where) {
       orderBy: { updatedAt: "desc" },
       take: limit,
       skip: offset,
-      include: { menuItems: true },
+      include: {
+        menuItems: true,
+        events: {
+          include: { extraServiceLines: true },
+          orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }],
+        },
+        extraServiceLines: true,
+      },
     });
     rows.push(...batch);
     if (batch.length < limit) break;
@@ -227,7 +212,7 @@ async function listScheduleEvents(req, res) {
 
       const has_more = skip + rows.length < total;
       return successResponse(res, "OK", {
-        bookings: rows.map((b) => serializeBooking(b)),
+        bookings: rows.map((b) => serializeBooking(b, { includePayments: false })),
         quotations: quotations.map(serializeQuotation),
         total_bookings: total,
         total_quotations: quotations.length,
@@ -248,6 +233,7 @@ async function listScheduleEvents(req, res) {
       : [];
 
     let bookings = [];
+    let totalBookings = 0;
     if (includeBookingsForFilter(filterNorm)) {
       const statuses = bookingStatusesForFilter(filterNorm);
       const bookingClauses = [{ businessId }];
@@ -257,17 +243,29 @@ async function listScheduleEvents(req, res) {
         bookingClauses.push({ status: { in: statuses } });
       }
       if (rangeClause) bookingClauses.push(rangeClause);
-      bookings = await fetchAllBookingsForSchedule({ AND: bookingClauses });
+      const where = { AND: bookingClauses };
+      const [rows, total] = await Promise.all([
+        prisma.booking.findMany({
+          where,
+          orderBy: { createdAt: "desc" },
+          take,
+          skip,
+          include: bookingListInclude,
+        }),
+        prisma.booking.count({ where }),
+      ]);
+      bookings = rows;
+      totalBookings = total;
     }
 
     return successResponse(res, "OK", {
-      bookings: bookings.map((b) => serializeBooking(b)),
+      bookings: bookings.map((b) => serializeBooking(b, { includePayments: false })),
       quotations: quotations.map(serializeQuotation),
-      total_bookings: bookings.length,
+      total_bookings: totalBookings,
       total_quotations: quotations.length,
-      limit: null,
-      offset: 0,
-      has_more: false,
+      limit: take,
+      offset: skip,
+      has_more: skip + bookings.length < totalBookings,
     });
   } catch (e) {
     console.error("listScheduleEvents:", e);

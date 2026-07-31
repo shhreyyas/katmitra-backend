@@ -7,6 +7,7 @@ const {
   patchBooking,
   createEvent,
   updateEvent,
+  replaceEventMenuItem,
   deleteEvent,
   getDashboard,
   listBookings,
@@ -132,6 +133,15 @@ router.delete(
   authMiddleware,
   businessContextMiddleware,
   deleteEvent,
+);
+
+// Swap this event's menu item id (used after a per-event recipe save forks a
+// business-private copy of a global catalog menu item)
+router.patch(
+  "/v1/bookings/:id/events/:eventId/replaceMenuItem",
+  authMiddleware,
+  businessContextMiddleware,
+  replaceEventMenuItem,
 );
 
 // Record Payment

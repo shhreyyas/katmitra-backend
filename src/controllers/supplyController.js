@@ -795,10 +795,21 @@ async function setEventSupplyItems(req, res) {
         await tx.bookingEventSupplyItem.createMany({
           data: payload.map((row) => {
             const source = byId.get(String(row.supply_item_id));
-            let qty = Math.max(
-              1,
-              Math.min(999, parseInt(String(row.quantity), 10) || 1),
-            );
+            // Ingredients may be fractional (e.g. 1.5 kg); utensils are
+            // discrete countable items and stay whole numbers.
+            let qty =
+              itemType === "INGREDIENT"
+                ? Math.max(
+                    0.01,
+                    Math.min(
+                      999,
+                      Math.round((parseFloat(String(row.quantity)) || 1) * 100) / 100,
+                    ),
+                  )
+                : Math.max(
+                    1,
+                    Math.min(999, parseInt(String(row.quantity), 10) || 1),
+                  );
             if (itemType === "UTENSIL") {
               const cap = effectiveUtensilAssignable(
                 source,
@@ -1076,8 +1087,16 @@ function normalizeMenuIngredients(raw) {
   return raw;
 }
 
-function ceilSupplyQty(n) {
-  return Math.min(999, Math.max(1, Math.ceil(Number(n) || 1)));
+/**
+ * Suggested/template ingredient quantities may now be fractional (e.g. a
+ * recipe scaled to 2.5 kg) — round to 2 decimals instead of ceiling to a
+ * whole number so precision survives. A non-positive input still means "no
+ * computed value yet" and keeps the previous friendly default of 1.
+ */
+function roundSupplyQty(n) {
+  const v = Number(n) || 0;
+  if (v <= 0) return 1;
+  return Math.min(999, Math.max(0.01, Math.round(v * 100) / 100));
 }
 
 function supplyUnitOptionsForRow(src, preferredUnit) {
@@ -1090,6 +1109,307 @@ function supplyUnitOptionsForRow(src, preferredUnit) {
   if (pref && !merged.includes(pref)) merged.unshift(pref);
   if (!merged.includes(fallback)) merged.push(fallback);
   return merged.length ? merged : [fallback];
+}
+
+/**
+ * Core scan of an event's menu-item snapshot rows, building both the
+ * whole-event aggregate buckets (for `suggestions`) and the per-menu-item
+ * breakdown (for `menu_items`) in one pass. Extracted so
+ * `computeMenuItemIngredientBreakdown` (used by the full-booking-PDF
+ * endpoint) can reuse the exact same scaling math without duplicating it.
+ */
+function computeEventMenuIngredientData(menuItems, guestMul, menuById, language) {
+  /** key = supplyItemId + "\t" + unit -> scaled numeric qty */
+  const buckets = new Map();
+  const legacy = [];
+  /** menuItemId -> { menu_item_id, name, quantity_per_plate, rows: Map<key, {supply_item_id, unit, qty_per_plate, quantity, cost}> } */
+  const byMenuItem = new Map();
+
+  for (const row of menuItems) {
+    const mid = String(row?.id ?? "").trim();
+    const menu = menuById.get(mid);
+    if (!menu) continue;
+    const qpp = Math.max(
+      1,
+      Math.floor(Number(row?.quantity_per_plate ?? row?.quantity ?? 1) || 1),
+    );
+    const plates = qpp * guestMul;
+    const ingredients = normalizeMenuIngredients(menu.ingredients);
+    let itemEntry = byMenuItem.get(mid);
+    if (!itemEntry) {
+      itemEntry = {
+        menu_item_id: mid,
+        name: resolveLocalizedName(menu.name, language),
+        quantity_per_plate: qpp,
+        rows: new Map(),
+      };
+      byMenuItem.set(mid, itemEntry);
+    }
+    for (const ing of ingredients) {
+      const sidRaw = ing?.supply_item_id ?? ing?.supplyItemId;
+      const sid = typeof sidRaw === "string" ? sidRaw.trim() : "";
+      const rawQty = ing?.qty ?? ing?.quantity;
+      const q = Number(String(rawQty ?? "").trim());
+      const baseQty = Number.isFinite(q) && q > 0 ? q : 0;
+      const unit = String(ing?.unit ?? "").trim() || "kg";
+      const scaled = baseQty * plates;
+      if (!sid) {
+        const nm = String(ing?.name ?? "").trim();
+        if (nm) {
+          legacy.push({ name: nm, unit, note: "no_supply_item_id" });
+        }
+        continue;
+      }
+      const key = `${sid}\t${unit}`;
+      // A recipe ingredient with no quantity defined yet (baseQty === 0, e.g. a
+      // freshly-added menu ingredient) must still surface in the per-menu-item
+      // breakdown so the caterer can define it there for the first time — only
+      // the whole-event aggregate `suggestions` list skips zero-quantity rows.
+      if (scaled > 0) {
+        buckets.set(key, (buckets.get(key) ?? 0) + scaled);
+      }
+      const existingRow = itemEntry.rows.get(key);
+      const rawCost = ing?.cost;
+      const cost = typeof rawCost === "number" ? rawCost : Number(rawCost);
+      itemEntry.rows.set(key, {
+        supply_item_id: sid,
+        unit,
+        qty_per_plate: baseQty,
+        quantity: (existingRow?.quantity ?? 0) + scaled,
+        // Preserved as-is (not scaled) so a client full-replace save doesn't
+        // silently zero out MenuItem's estimated_cost/profit calculation.
+        cost: Number.isFinite(cost) ? cost : (existingRow?.cost ?? undefined),
+      });
+    }
+  }
+
+  return { buckets, legacy, byMenuItem };
+}
+
+/**
+ * Per-menu-item ingredient breakdown for one booking event, scaled to its
+ * guest count — the recipe-computed view (no per-event manual overrides
+ * merged in, since those aren't attributable back to a specific dish). Used
+ * by the full-booking-PDF endpoint to build the "Ingredients by dish"
+ * sub-section for each event.
+ */
+async function computeMenuItemIngredientBreakdown(event, businessId, userId, language) {
+  const snap = event.eventSnapshot;
+  const menuItems = Array.isArray(snap?.menu_items) ? snap.menu_items : [];
+  if (menuItems.length === 0) return [];
+
+  const guests = Math.max(0, Number(event.guestCount) || 0);
+  const guestMul = guests > 0 ? guests : 1;
+
+  const menuIds = [
+    ...new Set(menuItems.map((row) => String(row?.id ?? "").trim()).filter(Boolean)),
+  ];
+  if (menuIds.length === 0) return [];
+
+  const menus = await prisma.menuItem.findMany({
+    where: { id: { in: menuIds } },
+    include: { category: true },
+  });
+  const visibleMenus = menus.filter((m) => canViewMenuItemForSupply(m, businessId, userId));
+  const menuById = new Map(visibleMenus.map((m) => [m.id, m]));
+
+  const { byMenuItem } = computeEventMenuIngredientData(menuItems, guestMul, menuById, language);
+
+  const supplyIds = [
+    ...new Set(
+      [...byMenuItem.values()].flatMap((item) =>
+        [...item.rows.values()].map((r) => r.supply_item_id),
+      ),
+    ),
+  ];
+  if (supplyIds.length === 0) {
+    return [...byMenuItem.values()].map((item) => ({
+      menu_item_id: item.menu_item_id,
+      name: item.name,
+      ingredients: [],
+    }));
+  }
+
+  const supplyRows = await prisma.supplyItem.findMany({
+    where: {
+      id: { in: supplyIds },
+      type: "INGREDIENT",
+      isActive: true,
+      OR: supplyVisibilityOrBranches(businessId, userId),
+    },
+  });
+  const supplyById = new Map(supplyRows.map((r) => [r.id, r]));
+
+  return [...byMenuItem.values()].map((item) => {
+    const ingredientsOut = [];
+    for (const rowEntry of item.rows.values()) {
+      const src = supplyById.get(rowEntry.supply_item_id);
+      if (!src) continue;
+      ingredientsOut.push({
+        supply_item_id: rowEntry.supply_item_id,
+        name: resolveLocalizedName(src.name, language),
+        unit: rowEntry.unit,
+        quantity: roundSupplyQty(rowEntry.quantity),
+      });
+    }
+    return {
+      menu_item_id: item.menu_item_id,
+      name: item.name,
+      ingredients: ingredientsOut,
+    };
+  });
+}
+
+/**
+ * GET /v1/bookings/:id/fullPdfSupplyBreakdown
+ *
+ * Assembles, for every event of a booking in one request, the data the
+ * full-booking PDF needs beyond what `getBooking` already returns:
+ *  - per-menu-item ingredient breakdown per event (recipe-computed, scaled
+ *    to that event's guest count).
+ *  - each event's actually-saved utensils (BookingEventSupplyItem, UTENSIL).
+ * Plus booking-wide totals for both ingredients and utensils, keyed by
+ * supply item, with a per-event quantity map — feeds the "Total Ingredients
+ * Used" / "Total Utensils Used" pivot tables. Totals use each event's
+ * actually-saved supply-list quantities; an event with nothing saved yet
+ * falls back to its recipe-computed sum so it isn't silently omitted.
+ */
+async function getFullBookingPdfSupplyBreakdown(req, res) {
+  try {
+    const businessId = req.businessId;
+    const userId = req.user?.userId;
+    const language = getRequestedLanguage(req);
+    const bookingId = req.params.id;
+
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, businessId },
+      select: { id: true },
+    });
+    if (!booking) return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+
+    const events = await prisma.bookingEvent.findMany({
+      where: { bookingId },
+      orderBy: { eventAt: "asc" },
+      select: { id: true, eventSnapshot: true, guestCount: true, eventAt: true },
+    });
+
+    const savedRows = await prisma.bookingEventSupplyItem.findMany({
+      where: { bookingEvent: { bookingId } },
+      orderBy: { createdAt: "asc" },
+    });
+    /** `${eventId}\t${itemType}` -> rows[] */
+    const savedByEventAndType = new Map();
+    for (const row of savedRows) {
+      const key = `${row.bookingEventId}\t${row.itemType}`;
+      if (!savedByEventAndType.has(key)) savedByEventAndType.set(key, []);
+      savedByEventAndType.get(key).push(row);
+    }
+
+    const eventsOut = [];
+    /** supplyItemId (or synthetic key for a not-yet-saved fallback) -> accumulator */
+    const ingredientTotals = new Map();
+    const utensilTotals = new Map();
+
+    const addToTotals = (map, key, name, unit, eventId, qty) => {
+      if (!(qty > 0)) return;
+      if (!map.has(key)) {
+        map.set(key, { name, unit, perEvent: new Map(), total: 0 });
+      }
+      const entry = map.get(key);
+      entry.perEvent.set(eventId, (entry.perEvent.get(eventId) ?? 0) + qty);
+      entry.total += qty;
+    };
+
+    for (const event of events) {
+      const menuItemsBreakdown = await computeMenuItemIngredientBreakdown(
+        event,
+        businessId,
+        userId,
+        language,
+      );
+
+      const savedIngredientRows = savedByEventAndType.get(`${event.id}\tINGREDIENT`) ?? [];
+      const savedUtensilRows = savedByEventAndType.get(`${event.id}\tUTENSIL`) ?? [];
+
+      eventsOut.push({
+        event_id: event.id,
+        menu_items: menuItemsBreakdown.map(({ menu_item_id, name, ingredients }) => ({
+          menu_item_id,
+          name,
+          ingredients: ingredients.map(({ name: n, unit, quantity }) => ({
+            name: n,
+            unit,
+            quantity,
+          })),
+        })),
+        utensils: savedUtensilRows.map((row) => ({
+          name: resolveLocalizedName(row.nameSnapshot, language),
+          quantity: row.quantity,
+          unit: row.unit,
+        })),
+      });
+
+      if (savedIngredientRows.length > 0) {
+        for (const row of savedIngredientRows) {
+          addToTotals(
+            ingredientTotals,
+            row.supplyItemId,
+            resolveLocalizedName(row.nameSnapshot, language),
+            row.unit,
+            event.id,
+            row.quantity,
+          );
+        }
+      } else {
+        for (const item of menuItemsBreakdown) {
+          for (const ing of item.ingredients) {
+            addToTotals(
+              ingredientTotals,
+              ing.supply_item_id,
+              ing.name,
+              ing.unit,
+              event.id,
+              ing.quantity,
+            );
+          }
+        }
+      }
+
+      for (const row of savedUtensilRows) {
+        addToTotals(
+          utensilTotals,
+          row.supplyItemId,
+          resolveLocalizedName(row.nameSnapshot, language),
+          row.unit,
+          event.id,
+          row.quantity,
+        );
+      }
+    }
+
+    const toRows = (map) =>
+      [...map.values()]
+        .map((e) => ({
+          name: e.name,
+          unit: e.unit,
+          per_event: Object.fromEntries(
+            [...e.perEvent.entries()].map(([eid, q]) => [eid, Math.round(q * 100) / 100]),
+          ),
+          total: Math.round(e.total * 100) / 100,
+        }))
+        .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+
+    return successResponse(res, "OK", {
+      events: eventsOut,
+      totals: {
+        ingredients: toRows(ingredientTotals),
+        utensils: toRows(utensilTotals),
+      },
+    });
+  } catch (e) {
+    console.error("getFullBookingPdfSupplyBreakdown:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
 }
 
 function buildSuggestedSupplyEventMeta(event, menuItemCount, lineCount) {
@@ -1153,6 +1473,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       return successResponse(res, "OK", {
         suggestions: [],
         legacy_without_supply: [],
+        menu_items: [],
         event: eventMetaBase,
         has_saved_ingredients: false,
       });
@@ -1207,6 +1528,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       return successResponse(res, "OK", {
         suggestions: manualOnly,
         legacy_without_supply: [],
+        menu_items: [],
         event: buildSuggestedSupplyEventMeta(
           event,
           0,
@@ -1227,6 +1549,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       return successResponse(res, "OK", {
         suggestions: [],
         legacy_without_supply: [],
+        menu_items: [],
         event: buildSuggestedSupplyEventMeta(event, menuItems.length, 0),
         has_saved_ingredients: hasSavedIngredients,
       });
@@ -1242,50 +1565,21 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
     );
     const menuById = new Map(visibleMenus.map((m) => [m.id, m]));
 
-    /** key = supplyItemId + "\t" + unit -> scaled numeric qty */
-    const buckets = new Map();
-    const legacy = [];
-
-    for (const row of menuItems) {
-      const mid = String(row?.id ?? "").trim();
-      const menu = menuById.get(mid);
-      if (!menu) continue;
-      const qpp = Math.max(
-        1,
-        Math.floor(
-          Number(row?.quantity_per_plate ?? row?.quantity ?? 1) || 1,
-        ),
-      );
-      const plates = qpp * guestMul;
-      const ingredients = normalizeMenuIngredients(menu.ingredients);
-      for (const ing of ingredients) {
-        const sidRaw = ing?.supply_item_id ?? ing?.supplyItemId;
-        const sid = typeof sidRaw === "string" ? sidRaw.trim() : "";
-        const rawQty = ing?.qty ?? ing?.quantity;
-        const q = Number(String(rawQty ?? "").trim());
-        const baseQty = Number.isFinite(q) && q > 0 ? q : 0;
-        const unit = String(ing?.unit ?? "").trim() || "kg";
-        const scaled = baseQty * plates;
-        if (!sid) {
-          const nm = String(ing?.name ?? "").trim();
-          if (nm) {
-            legacy.push({
-              name: nm,
-              unit,
-              note: "no_supply_item_id",
-            });
-          }
-          continue;
-        }
-        if (scaled <= 0) continue;
-        const key = `${sid}\t${unit}`;
-        buckets.set(key, (buckets.get(key) ?? 0) + scaled);
-      }
-    }
+    const { buckets, legacy, byMenuItem } = computeEventMenuIngredientData(
+      menuItems,
+      guestMul,
+      menuById,
+      language,
+    );
 
     const supplyIdsFromMenu = [
       ...new Set(
-        [...buckets.keys()].map((k) => k.split("\t")[0]).filter(Boolean),
+        [
+          ...[...buckets.keys()].map((k) => k.split("\t")[0]),
+          ...[...byMenuItem.values()].flatMap((item) =>
+            [...item.rows.values()].map((r) => r.supply_item_id),
+          ),
+        ].filter(Boolean),
       ),
     ];
     const supplyIdsSaved = savedRows.map((r) => r.supplyItemId);
@@ -1294,9 +1588,18 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
     ];
 
     if (supplyIds.length === 0) {
+      // Still surface every event menu item (with an empty ingredient list) so
+      // a business with no recipe defined yet can start one from scratch.
+      const emptyMenuItems = [...byMenuItem.values()].map((item) => ({
+        menu_item_id: item.menu_item_id,
+        name: item.name,
+        quantity_per_plate: item.quantity_per_plate,
+        ingredients: [],
+      }));
       return successResponse(res, "OK", {
         suggestions: [],
         legacy_without_supply: legacy,
+        menu_items: emptyMenuItems,
         event: buildSuggestedSupplyEventMeta(event, menuItems.length, 0),
         has_saved_ingredients: hasSavedIngredients,
       });
@@ -1325,7 +1628,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
         src.defaultUnit ||
         (src.unitOptions && src.unitOptions[0]) ||
         "kg";
-      const templateQty = ceilSupplyQty(total);
+      const templateQty = roundSupplyQty(total);
       const templateUnit = unit;
       const saved = savedBySupplyId.get(sid);
       suggestions.push({
@@ -1369,9 +1672,34 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       String(a.name || "").localeCompare(String(b.name || "")),
     );
 
+    const menu_items = [];
+    for (const item of byMenuItem.values()) {
+      const ingredientsOut = [];
+      for (const rowEntry of item.rows.values()) {
+        const src = supplyById.get(rowEntry.supply_item_id);
+        if (!src) continue;
+        ingredientsOut.push({
+          supply_item_id: rowEntry.supply_item_id,
+          name: resolveLocalizedName(src.name, language),
+          unit: rowEntry.unit,
+          qty_per_plate: rowEntry.qty_per_plate,
+          quantity: roundSupplyQty(rowEntry.quantity),
+          category_slug: src.categorySlug,
+          cost: rowEntry.cost ?? null,
+        });
+      }
+      menu_items.push({
+        menu_item_id: item.menu_item_id,
+        name: item.name,
+        quantity_per_plate: item.quantity_per_plate,
+        ingredients: ingredientsOut,
+      });
+    }
+
     return successResponse(res, "OK", {
       suggestions,
       legacy_without_supply: legacy,
+      menu_items,
       event: buildSuggestedSupplyEventMeta(
         event,
         menuItems.length,
@@ -1866,6 +2194,7 @@ module.exports = {
   getEventSupplySummary,
   getBookingEventsSupplySummaries,
   getSuggestedEventSupplyFromMenu,
+  getFullBookingPdfSupplyBreakdown,
   createVendor,
   listVendors,
   updateVendor,

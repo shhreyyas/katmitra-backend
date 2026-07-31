@@ -486,6 +486,36 @@ function serializeBooking(b, { includePayments = true } = {}) {
   };
 }
 
+/**
+ * Lightweight list-row shape for the Orders list (`listBookings?lite=1`) — only the
+ * fields a list card needs, so the query stays a cheap `select` instead of eagerly
+ * loading every event's menu snapshot / extra service lines / payments per row.
+ */
+function serializeBookingListRow(b) {
+  const events = b.events || [];
+  const nextEvent = events[0];
+  const nextEventAt = nextEvent?.eventAt ?? b.eventAt ?? null;
+  /** Deduped, chronological (events are pre-sorted by eventAt asc). */
+  const jamanvarTypes = [
+    ...new Set(events.map((ev) => ev.jamanvarType).filter(Boolean)),
+  ];
+  return {
+    id: b.id,
+    booking_code: b.bookingCode,
+    customer_name: b.customerName,
+    customer_phone: b.customerPhone,
+    status: b.status,
+    payment_status: paymentStatusFromAmounts(num(b.amountPaid), num(b.totalDue)),
+    event_at: nextEventAt?.toISOString?.() ?? nextEventAt,
+    jamanvar_types: jamanvarTypes,
+    event_count: b._count?.events ?? events.length,
+    guest_count: b.guestCount,
+    total_due: num(b.totalDue),
+    amount_paid: num(b.amountPaid),
+    created_at: b.createdAt?.toISOString?.() ?? b.createdAt,
+  };
+}
+
 function bookingEventTimestampsFromRow(b) {
   const events = [...(b.events || [])].sort((a, c) => {
     const ta = a.eventAt ? new Date(a.eventAt).getTime() : 0;
@@ -1216,6 +1246,83 @@ async function updateEvent(req, res) {
 }
 
 /**
+ * PATCH /v1/bookings/:id/events/:eventId/replaceMenuItem
+ *
+ * Swaps one menu item id for another inside this event's `event_snapshot.menu_items`,
+ * keeping every other field on that row (quantity_per_plate, price overrides, etc.)
+ * untouched. Used right after a per-event recipe save forks a business-private copy
+ * of a global catalog menu item (see menuController.updateMenuItem) — without this,
+ * the event would keep pointing at the untouched original and never see the newly
+ * saved recipe quantities.
+ */
+async function replaceEventMenuItem(req, res) {
+  try {
+    const businessId = req.businessId;
+    const bookingId = req.params.id;
+    const eventId = req.params.eventId;
+    const oldMenuItemId = String(req.body?.old_menu_item_id || "").trim();
+    const newMenuItemId = String(req.body?.new_menu_item_id || "").trim();
+    if (!oldMenuItemId || !newMenuItemId) {
+      return errorResponse(
+        res,
+        "old_menu_item_id and new_menu_item_id are required",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const booking = await prisma.booking.findFirst({
+      where: { id: bookingId, businessId },
+      select: { id: true, status: true },
+    });
+    if (!booking) return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    if (booking.status === "CANCELLED") {
+      return errorResponse(
+        res,
+        "Cancelled booking cannot be updated",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const event = await prisma.bookingEvent.findFirst({
+      where: { id: eventId, bookingId },
+      select: { id: true, eventSnapshot: true },
+    });
+    if (!event) return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+
+    const snapshot = event.eventSnapshot;
+    const menuItems = Array.isArray(snapshot?.menu_items) ? snapshot.menu_items : [];
+    let changed = false;
+    const nextMenuItems = menuItems.map((row) => {
+      if (String(row?.id ?? "").trim() === oldMenuItemId) {
+        changed = true;
+        return { ...row, id: newMenuItemId };
+      }
+      return row;
+    });
+
+    if (!changed) {
+      return successResponse(res, "No matching menu item in this event", {
+        updated: false,
+      });
+    }
+
+    await prisma.bookingEvent.update({
+      where: { id: eventId },
+      data: {
+        eventSnapshot: { ...snapshot, menu_items: nextMenuItems },
+      },
+    });
+
+    return successResponse(res, "Event menu item replaced", { updated: true });
+  } catch (e) {
+    console.error("replaceEventMenuItem:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+/**
  * POST /v1/bookings/:id/createEvent — create single event in draft booking
  */
 async function createEvent(req, res) {
@@ -1379,8 +1486,9 @@ function deriveBookingEventMs(b) {
 async function getDashboard(req, res) {
   try {
     const businessId = req.businessId;
+    const now = new Date();
 
-    const [confirmedRows, draftCount] = await Promise.all([
+    const [confirmedRows, draftCount, upcomingOrdersCount] = await Promise.all([
       prisma.booking.findMany({
         where: { businessId, status: "CONFIRMED" },
         orderBy: { createdAt: "desc" },
@@ -1393,9 +1501,20 @@ async function getDashboard(req, res) {
         },
       }),
       prisma.booking.count({ where: { businessId, status: "DRAFT" } }),
+      // Matches listBookings' own event_from=now filter, so this count stays
+      // consistent with what the Orders list actually shows when opened.
+      prisma.booking.count({
+        where: {
+          businessId,
+          status: "CONFIRMED",
+          OR: [
+            { eventAt: { gte: now } },
+            { events: { some: { eventAt: { gte: now } } } },
+          ],
+        },
+      }),
     ]);
 
-    const now = new Date();
     const startToday = new Date(now);
     startToday.setHours(0, 0, 0, 0);
     const endToday = new Date(startToday);
@@ -1447,6 +1566,7 @@ async function getDashboard(req, res) {
       draft_count: draftCount,
       payment_due_total: paymentDueTotal,
       orders_to_prepare_count: ordersToPrepare,
+      upcoming_orders_count: upcomingOrdersCount,
       today_timeline: todayRaw.map(({ b }) => serializeBooking(b)),
       upcoming_bookings: upcomingRaw.slice(0, 5).map(({ b }) => serializeBooking(b)),
       completed_orders: completedRaw.slice(0, 5).map(({ b }) => serializeBooking(b)),
@@ -1557,6 +1677,8 @@ async function listBookings(req, res) {
     )
       .trim()
       .slice(0, 160);
+    const isLite = req.query.lite === "1" || req.query.lite === "true";
+    const nameOnly = req.query.name_only === "1" || req.query.name_only === "true";
 
     /** Single explicit AND avoids Prisma quirks mixing top-level filters with `where.AND`. */
     const clauses = [{ businessId }];
@@ -1587,31 +1709,36 @@ async function listBookings(req, res) {
       });
     }
     if (searchQRaw.length > 0) {
-      /** Match client, contact, booking code, venues, types, notes; nested events. */
       const ic = { contains: searchQRaw, mode: "insensitive" };
-      const eventRowsOr = [
-        { eventLocation: ic },
-        { functionType: ic },
-        { notes: ic },
-      ];
-      clauses.push({
-        OR: [
-          { customerName: ic },
-          { customerPhone: ic },
-          { bookingCode: ic },
-          { customerEmail: ic },
+      if (nameOnly) {
+        /** Orders screen: search matches the customer/order name only. */
+        clauses.push({ customerName: ic });
+      } else {
+        /** Match client, contact, booking code, venues, types, notes; nested events. */
+        const eventRowsOr = [
           { eventLocation: ic },
           { functionType: ic },
           { notes: ic },
-          {
-            events: {
-              some: {
-                OR: eventRowsOr,
+        ];
+        clauses.push({
+          OR: [
+            { customerName: ic },
+            { customerPhone: ic },
+            { bookingCode: ic },
+            { customerEmail: ic },
+            { eventLocation: ic },
+            { functionType: ic },
+            { notes: ic },
+            {
+              events: {
+                some: {
+                  OR: eventRowsOr,
+                },
               },
             },
-          },
-        ],
-      });
+          ],
+        });
+      }
     }
     if (created_from || created_to) {
       const createdAt = {};
@@ -1644,12 +1771,36 @@ async function listBookings(req, res) {
           : { createdAt: "desc" },
         take,
         skip,
-        include: {
-          menuItems: true,
-          extraServiceLines: true,
-          events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
-          payments: { orderBy: { createdAt: "desc" }, take: 5 },
-        },
+        ...(isLite
+          ? {
+              select: {
+                id: true,
+                bookingCode: true,
+                customerName: true,
+                customerPhone: true,
+                status: true,
+                paymentStatus: true,
+                eventAt: true,
+                guestCount: true,
+                totalDue: true,
+                amountPaid: true,
+                createdAt: true,
+                /** All events (not just the next one) — small rows, needed for the meal-type list on the Orders card. */
+                events: {
+                  select: { eventAt: true, jamanvarType: true },
+                  orderBy: { eventAt: "asc" },
+                },
+                _count: { select: { events: true } },
+              },
+            }
+          : {
+              include: {
+                menuItems: true,
+                extraServiceLines: true,
+                events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
+                payments: { orderBy: { createdAt: "desc" }, take: 5 },
+              },
+            }),
       }),
       prisma.booking.count({ where }),
     ]);
@@ -1657,7 +1808,7 @@ async function listBookings(req, res) {
     const has_more = skip + rows.length < total;
 
     return successResponse(res, "OK", {
-      bookings: rows.map((b) => serializeBooking(b)),
+      bookings: rows.map((b) => (isLite ? serializeBookingListRow(b) : serializeBooking(b))),
       total,
       limit: take,
       offset: skip,
@@ -2064,6 +2215,7 @@ module.exports = {
   patchBooking,
   createEvent,
   updateEvent,
+  replaceEventMenuItem,
   deleteEvent,
   getDashboard,
   listBookings,
@@ -2080,4 +2232,6 @@ module.exports = {
   canEditMenuBeforeEvent,
   canEditCustomerDetailsBeforeEvent,
   serializeBooking,
+  loadBookingForBusiness,
+  generateUniqueBookingCode,
 };

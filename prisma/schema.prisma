@@ -9,11 +9,11 @@ datasource db {
 }
 
 model ServiceType {
-  id     Int    @id @default(autoincrement())
+  id     Int     @id @default(autoincrement())
   name   Json
-  slug   String @unique
+  slug   String  @unique
   icon   String?
-  status Int    @default(1)
+  status Int     @default(1)
 
   businesses BusinessServiceType[]
 }
@@ -28,25 +28,26 @@ model BusinessServiceType {
 }
 
 model Business {
-  id                   String   @id @default(uuid())
-  name                 String?
-  ownerName            String?
-  sameAsOwnerNumber    Boolean  @default(false)
-  contactNumber        String?
-  email                String?
-  address              String?
-  cateringTypes        String[] @default([])
-  yearsExperience      Int?
-  registrationNumber   String?
-  gstNumber            String?
-  logoUrl              String?
+  id                 String   @id @default(uuid())
+  name               String?
+  ownerName          String?
+  sameAsOwnerNumber  Boolean  @default(false)
+  contactNumber      String?
+  email              String?
+  address            String?
+  cateringTypes      String[] @default([])
+  yearsExperience    Int?
+  registrationNumber String?
+  gstNumber          String?
+  logoUrl            String?
+  termsAndConditions String?  @db.Text
 
-  subscriptionStatus String? @default("trial")
-  subscriptionPlan     String? @default("FREE")
-  subscriptionStart    DateTime?
-  subscriptionEnd      DateTime?
-  isTrialUsed          Boolean @default(false)
-  razorpayCustomerId   String?
+  subscriptionStatus String?   @default("trial")
+  subscriptionPlan   String?   @default("FREE")
+  subscriptionStart  DateTime?
+  subscriptionEnd    DateTime?
+  isTrialUsed        Boolean   @default(false)
+  razorpayCustomerId String?
 
   createdByUserId String?
   createdBy       User?   @relation("BusinessCreatedBy", fields: [createdByUserId], references: [id])
@@ -59,17 +60,17 @@ model Business {
   defaultServiceChargePct Decimal @default(10) @db.Decimal(5, 2)
   defaultTaxPct           Decimal @default(5) @db.Decimal(5, 2)
 
-  users        User[]
-  serviceLinks BusinessServiceType[]
-  menuItems    MenuItem[]
-  dishes       Dish[]
-  bookings     Booking[]
-  quotations   Quotation[]
-  supplyItems SupplyItem[]
-  supplySavedLists SupplySavedList[]
-  vendors     Vendor[]
-  staff       Staff[]
-  extraServices ExtraService[]
+  users                User[]
+  serviceLinks         BusinessServiceType[]
+  menuItems            MenuItem[]
+  dishes               Dish[]
+  bookings             Booking[]
+  quotations           Quotation[]
+  supplyItems          SupplyItem[]
+  supplySavedLists     SupplySavedList[]
+  vendors              Vendor[]
+  staff                Staff[]
+  extraServices        ExtraService[]
   billingSubscriptions BillingSubscription[]
   billingPaymentEvents BillingPaymentEvent[]
 }
@@ -95,17 +96,17 @@ model BillingSubscription {
 }
 
 model BillingPaymentEvent {
-  id                      String               @id @default(uuid())
-  businessId              String
-  business                Business             @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  billingSubscriptionId   String?
-  billingSubscription     BillingSubscription? @relation(fields: [billingSubscriptionId], references: [id], onDelete: SetNull)
-  razorpayPaymentId       String?              @unique
-  razorpayInvoiceId       String?
-  amountPaise             BigInt               @default(0)
-  status                  String
-  rawWebhookEventId       String?
-  createdAt               DateTime             @default(now())
+  id                    String               @id @default(uuid())
+  businessId            String
+  business              Business             @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  billingSubscriptionId String?
+  billingSubscription   BillingSubscription? @relation(fields: [billingSubscriptionId], references: [id], onDelete: SetNull)
+  razorpayPaymentId     String?              @unique
+  razorpayInvoiceId     String?
+  amountPaise           BigInt               @default(0)
+  status                String
+  rawWebhookEventId     String?
+  createdAt             DateTime             @default(now())
 
   @@index([businessId])
   @@index([billingSubscriptionId])
@@ -143,17 +144,17 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  business          Business? @relation(fields: [businessId], references: [id])
-  businessesCreated Business[] @relation("BusinessCreatedBy")
-  menuItemsCreated  MenuItem[]
-  supplyItemsCreated SupplyItem[]
-  supplySavedListsCreated SupplySavedList[] @relation("SupplySavedListCreator")
-  extraServicesCreated ExtraService[]
-  contactMessages   ContactMessage[]
-  accessCodesAssigned AccessCode[] @relation("AccessCodeAssignedUser")
-  notificationLogsCreated NotificationLog[] @relation("NotificationLogCreator")
-  userNotifications UserNotification[]
-  onboardingReminders OnboardingReminder[]
+  business                Business?            @relation(fields: [businessId], references: [id])
+  businessesCreated       Business[]           @relation("BusinessCreatedBy")
+  menuItemsCreated        MenuItem[]
+  supplyItemsCreated      SupplyItem[]
+  supplySavedListsCreated SupplySavedList[]    @relation("SupplySavedListCreator")
+  extraServicesCreated    ExtraService[]
+  contactMessages         ContactMessage[]
+  accessCodesAssigned     AccessCode[]         @relation("AccessCodeAssignedUser")
+  notificationLogsCreated NotificationLog[]    @relation("NotificationLogCreator")
+  userNotifications       UserNotification[]
+  onboardingReminders     OnboardingReminder[]
 }
 
 /// Admin-generated subscription access codes (6-digit) for caterer onboarding.
@@ -180,8 +181,8 @@ model UserNotification {
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   title     String
   body      String    @db.Text
-  type      String    // "event_reminder" | "admin_broadcast"
-  data      Json?     // { bookingId?, bookingEventId?, notificationLogId? }
+  type      String // "event_reminder" | "admin_broadcast"
+  data      Json? // { bookingId?, bookingEventId?, notificationLogId? }
   isRead    Boolean   @default(false)
   readAt    DateTime?
   createdAt DateTime  @default(now())
@@ -261,29 +262,29 @@ model ContactMessage {
 
 model MenuItem {
   /// Server-generated UUID; not accepted from clients on create.
-  id              String   @id @default(uuid())
+  id              String  @id @default(uuid())
   name            Json
-  description     String?  @db.Text
-  howToMake       String?  @db.Text
-  pricePerPerson  Decimal  @db.Decimal(12, 2)
+  description     String? @db.Text
+  howToMake       String? @db.Text
+  pricePerPerson  Decimal @db.Decimal(12, 2)
   categorySlug    String
   foodType        String
   businessId      String?
   createdByUserId String?
   /// false only when both businessId and createdByUserId are set; otherwise true (catalog / import).
-  isGlobal        Boolean  @default(false)
+  isGlobal        Boolean @default(false)
   parentMenuId    String?
-  ingredients     Json     @default("[]")
+  ingredients     Json    @default("[]")
   imageUrl        String?
 
-  business    Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  createdBy   User?     @relation(fields: [createdByUserId], references: [id])
-  category    MenuCategory @relation(fields: [categorySlug], references: [slug])
-  parentMenu  MenuItem? @relation("MenuItemLineage", fields: [parentMenuId], references: [id])
-  childCopies MenuItem[] @relation("MenuItemLineage")
-  bookingMenuItems    BookingMenuItem[]
-  quotationMenuItems  QuotationMenuItem[]
-  dishMenuItems       DishMenuItem[]
+  business           Business?           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy          User?               @relation(fields: [createdByUserId], references: [id])
+  category           MenuCategory        @relation(fields: [categorySlug], references: [slug])
+  parentMenu         MenuItem?           @relation("MenuItemLineage", fields: [parentMenuId], references: [id])
+  childCopies        MenuItem[]          @relation("MenuItemLineage")
+  bookingMenuItems   BookingMenuItem[]
+  quotationMenuItems QuotationMenuItem[]
+  dishMenuItems      DishMenuItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -297,11 +298,11 @@ model MenuItem {
 
 /// Global menu categories (admin-managed). Names are localized JSON maps.
 model MenuCategory {
-  id        String   @id @default(uuid())
+  id        String     @id @default(uuid())
   name      Json
-  slug      String   @unique
-  sortOrder Int      @default(0)
-  isActive  Boolean  @default(true)
+  slug      String     @unique
+  sortOrder Int        @default(0)
+  isActive  Boolean    @default(true)
   menuItems MenuItem[]
 
   createdAt DateTime @default(now())
@@ -384,7 +385,7 @@ enum ExtraServicePricingType {
 }
 
 model Booking {
-  id     String @id @default(uuid())
+  id         String   @id @default(uuid())
   businessId String
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
@@ -392,9 +393,9 @@ model Booking {
   stepNumber  Int           @default(1)
   bookingCode String?
 
-  customerName  String?
-  customerPhone String?
-  customerEmail String?
+  customerName    String?
+  customerPhone   String?
+  customerEmail   String?
   eventRangeStart DateTime?
   eventRangeEnd   DateTime?
 
@@ -402,22 +403,22 @@ model Booking {
   eventLocation String?
   functionType  String?
   guestCount    Int?
-  notes         String? @db.Text
+  notes         String?   @db.Text
 
-  discountAmount      Decimal @default(0) @db.Decimal(12, 2)
-  serviceChargePct    Decimal @default("10") @db.Decimal(5, 2)
-  taxPct              Decimal @default("5") @db.Decimal(5, 2)
-  subtotal            Decimal @default(0) @db.Decimal(12, 2)
-  serviceChargeAmount Decimal @default(0) @db.Decimal(12, 2)
-  taxAmount           Decimal @default(0) @db.Decimal(12, 2)
-  totalDue            Decimal @default(0) @db.Decimal(12, 2)
-  amountPaid          Decimal @default(0) @db.Decimal(12, 2)
+  discountAmount      Decimal       @default(0) @db.Decimal(12, 2)
+  serviceChargePct    Decimal       @default("10") @db.Decimal(5, 2)
+  taxPct              Decimal       @default("5") @db.Decimal(5, 2)
+  subtotal            Decimal       @default(0) @db.Decimal(12, 2)
+  serviceChargeAmount Decimal       @default(0) @db.Decimal(12, 2)
+  taxAmount           Decimal       @default(0) @db.Decimal(12, 2)
+  totalDue            Decimal       @default(0) @db.Decimal(12, 2)
+  amountPaid          Decimal       @default(0) @db.Decimal(12, 2)
   paymentStatus       PaymentStatus @default(PENDING)
 
-  menuItems BookingMenuItem[]
-  supplyItems BookingSupplyItem[]
-  payments  PaymentTransaction[]
-  events    BookingEvent[]
+  menuItems         BookingMenuItem[]
+  supplyItems       BookingSupplyItem[]
+  payments          PaymentTransaction[]
+  events            BookingEvent[]
   extraServiceLines BookingExtraServiceLine[]
   bookingReminders  BookingReminder[]
 
@@ -434,29 +435,29 @@ model Booking {
 }
 
 model BookingEvent {
-  id           String      @id @default(uuid())
-  bookingId    String
-  eventAt      DateTime?
+  id            String      @id @default(uuid())
+  bookingId     String
+  eventAt       DateTime?
   eventLocation String?
-  functionType String?
-  jamanvarType String?
-  guestCount   Int?
-  notes        String?     @db.Text
-  status       EventStatus @default(PENDING)
-  dishId       String?
-  parentDishId String?
-  isTemplate   Boolean?
-  eventTotal   Decimal?    @db.Decimal(12, 2)
+  functionType  String?
+  jamanvarType  String?
+  guestCount    Int?
+  notes         String?     @db.Text
+  status        EventStatus @default(PENDING)
+  dishId        String?
+  parentDishId  String?
+  isTemplate    Boolean?
+  eventTotal    Decimal?    @db.Decimal(12, 2)
   eventSnapshot Json?
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
 
-  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  supplyItems BookingEventSupplyItem[]
-  supplySavedLists SupplySavedList[]
-  staffAssignments EventStaff[]
+  booking           Booking                   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  supplyItems       BookingEventSupplyItem[]
+  supplySavedLists  SupplySavedList[]
+  staffAssignments  EventStaff[]
   extraServiceLines BookingExtraServiceLine[]
-  eventReminders EventReminder[]
+  eventReminders    EventReminder[]
 
   @@index([bookingId])
   @@index([bookingId, eventAt])
@@ -470,7 +471,7 @@ model EventReminder {
   id             String       @id @default(uuid())
   bookingEventId String
   bookingEvent   BookingEvent @relation(fields: [bookingEventId], references: [id], onDelete: Cascade)
-  reminderType   String       // "24_HOUR" | "2_HOUR" | "30_MINUTE"
+  reminderType   String // "24_HOUR" | "2_HOUR" | "30_MINUTE"
   sentAt         DateTime     @default(now())
   createdAt      DateTime     @default(now())
 
@@ -496,29 +497,29 @@ model BookingMenuItem {
 }
 
 model SupplyItem {
-  id             String @id @default(uuid())
-  businessId     String?
-  business       Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  id              String             @id @default(uuid())
+  businessId      String?
+  business        Business?          @relation(fields: [businessId], references: [id], onDelete: Cascade)
   createdByUserId String?
-  createdBy       User?     @relation(fields: [createdByUserId], references: [id])
+  createdBy       User?              @relation(fields: [createdByUserId], references: [id])
   /// false only when both businessId and createdByUserId are set; otherwise true (catalog / import).
-  isGlobal       Boolean  @default(false)
-  type           SupplyItemType
-  categorySlug   String
-  category       SupplyItemCategory @relation(fields: [categorySlug], references: [slug], onDelete: Restrict)
-  name           Json
-  unitOptions    String[] @default([])
-  defaultUnit    String
-  availableCount Int?
-  damagedCount   Int      @default(0)
-  photoUrl       String?
-  isActive       Boolean @default(true)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  isGlobal        Boolean            @default(false)
+  type            SupplyItemType
+  categorySlug    String
+  category        SupplyItemCategory @relation(fields: [categorySlug], references: [slug], onDelete: Restrict)
+  name            Json
+  unitOptions     String[]           @default([])
+  defaultUnit     String
+  availableCount  Int?
+  damagedCount    Int                @default(0)
+  photoUrl        String?
+  isActive        Boolean            @default(true)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
 
-  bookingSupplyItems BookingSupplyItem[]
+  bookingSupplyItems      BookingSupplyItem[]
   bookingEventSupplyItems BookingEventSupplyItem[]
-  supplySavedListItems SupplySavedListItem[]
+  supplySavedListItems    SupplySavedListItem[]
 
   @@index([businessId])
   @@index([createdByUserId])
@@ -528,19 +529,19 @@ model SupplyItem {
 }
 
 model BookingSupplyItem {
-  id             String @id @default(uuid())
-  bookingId      String
-  supplyItemId   String
-  quantity       Int @default(1)
-  unit           String
-  categorySlug   String
-  category       SupplyItemCategory @relation(fields: [categorySlug], references: [slug], onDelete: Restrict)
-  nameSnapshot   Json
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id           String             @id @default(uuid())
+  bookingId    String
+  supplyItemId String
+  quantity     Int                @default(1)
+  unit         String
+  categorySlug String
+  category     SupplyItemCategory @relation(fields: [categorySlug], references: [slug], onDelete: Restrict)
+  nameSnapshot Json
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
 
-  booking      Booking      @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  supplyItem   SupplyItem   @relation(fields: [supplyItemId], references: [id], onDelete: Restrict)
+  booking    Booking    @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  supplyItem SupplyItem @relation(fields: [supplyItemId], references: [id], onDelete: Restrict)
 
   @@unique([bookingId, supplyItemId])
   @@index([bookingId, categorySlug])
@@ -548,17 +549,19 @@ model BookingSupplyItem {
 }
 
 model BookingEventSupplyItem {
-  id             String @id @default(uuid())
+  id             String             @id @default(uuid())
   bookingEventId String
   supplyItemId   String
   itemType       SupplyItemType
-  quantity       Int @default(1)
+  /// Ingredient quantities may be fractional (e.g. 1.5 kg); utensils stay
+  /// whole numbers by application-layer validation, not by the column type.
+  quantity       Float              @default(1)
   unit           String
   categorySlug   String
   category       SupplyItemCategory @relation(fields: [categorySlug], references: [slug], onDelete: Restrict)
   nameSnapshot   Json
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
 
   bookingEvent BookingEvent @relation(fields: [bookingEventId], references: [id], onDelete: Cascade)
   supplyItem   SupplyItem   @relation(fields: [supplyItemId], references: [id], onDelete: Restrict)
@@ -578,8 +581,8 @@ model SupplyItemCategory {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  supplyItems           SupplyItem[]
-  bookingSupplyItems    BookingSupplyItem[]
+  supplyItems             SupplyItem[]
+  bookingSupplyItems      BookingSupplyItem[]
   bookingEventSupplyItems BookingEventSupplyItem[]
 
   @@index([isActive, sortOrder])
@@ -597,20 +600,20 @@ model Unit {
 }
 
 model Dish {
-  id            String   @id @default(uuid())
-  businessId    String
-  business      Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  name          String
-  pricePerPlate Decimal  @default(0) @db.Decimal(12, 2)
-  isTemplate    Boolean  @default(true)
-  parentDishId  String?
-  parentDish    Dish?    @relation("DishLineage", fields: [parentDishId], references: [id])
-  childDishes   Dish[]   @relation("DishLineage")
-  menuItems           DishMenuItem[]
-  requiredIngredients           Json     @default("[]") // dish-level totals; does not modify MenuItem.ingredients
-  requiredIngredientsCustomized Boolean  @default(false)
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  id                            String         @id @default(uuid())
+  businessId                    String
+  business                      Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name                          String
+  pricePerPlate                 Decimal        @default(0) @db.Decimal(12, 2)
+  isTemplate                    Boolean        @default(true)
+  parentDishId                  String?
+  parentDish                    Dish?          @relation("DishLineage", fields: [parentDishId], references: [id])
+  childDishes                   Dish[]         @relation("DishLineage")
+  menuItems                     DishMenuItem[]
+  requiredIngredients           Json           @default("[]") // dish-level totals; does not modify MenuItem.ingredients
+  requiredIngredientsCustomized Boolean        @default(false)
+  createdAt                     DateTime       @default(now())
+  updatedAt                     DateTime       @updatedAt
 
   @@index([businessId])
   @@index([parentDishId])
@@ -618,13 +621,13 @@ model Dish {
 }
 
 model DishMenuItem {
-  id          String   @id @default(uuid())
-  dishId      String
-  menuItemId  String
-  quantity    Int      @default(1)
-  dish        Dish     @relation(fields: [dishId], references: [id], onDelete: Cascade)
-  menuItem    MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
-  createdAt   DateTime @default(now())
+  id         String   @id @default(uuid())
+  dishId     String
+  menuItemId String
+  quantity   Int      @default(1)
+  dish       Dish     @relation(fields: [dishId], references: [id], onDelete: Cascade)
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+  createdAt  DateTime @default(now())
 
   @@unique([dishId, menuItemId])
   @@index([dishId])
@@ -643,29 +646,35 @@ model PaymentTransaction {
 }
 
 model Quotation {
-  id     String @id @default(uuid())
+  id         String   @id @default(uuid())
   businessId String
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   status QuotationStatus @default(SALE)
 
-  clientName  String
-  clientPhone String?
-  functionType String?
-  eventDate   DateTime?
-  guestCount  Int       @default(0)
-  discountAmount      Decimal @default(0) @db.Decimal(12, 2)
-  serviceChargePct    Decimal @default("10") @db.Decimal(5, 2)
-  taxPct              Decimal @default("5") @db.Decimal(5, 2)
-  subtotal            Decimal @db.Decimal(12, 2)
-  serviceChargeAmount Decimal @db.Decimal(12, 2)
-  taxAmount           Decimal @db.Decimal(12, 2)
-  total               Decimal @db.Decimal(12, 2)
+  clientName          String
+  clientPhone         String?
+  functionType        String?
+  eventDate           DateTime?
+  guestCount          Int       @default(0)
+  discountAmount      Decimal   @default(0) @db.Decimal(12, 2)
+  serviceChargePct    Decimal   @default("10") @db.Decimal(5, 2)
+  taxPct              Decimal   @default("5") @db.Decimal(5, 2)
+  subtotal            Decimal   @db.Decimal(12, 2)
+  serviceChargeAmount Decimal   @db.Decimal(12, 2)
+  taxAmount           Decimal   @db.Decimal(12, 2)
+  total               Decimal   @db.Decimal(12, 2)
   /// Agreed per-guest menu bundle (custom or predefined); null when only per-line catalog snapshots apply.
-  platePrice Decimal? @db.Decimal(12, 2)
+  platePrice          Decimal?  @db.Decimal(12, 2)
 
   menuItems          QuotationMenuItem[]
   quotationReminders QuotationReminder[]
+  events             QuotationEvent[]
+  extraServiceLines  QuotationExtraServiceLine[]
+
+  /// Set once this quotation has been converted into a real Booking (client approved). Guards against duplicate conversion.
+  convertedBookingId String?   @unique
+  convertedAt        DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -687,70 +696,122 @@ model QuotationMenuItem {
   @@index([quotationId])
 }
 
+/// Mirrors BookingEvent: one quotation can span multiple sessions (breakfast/lunch/dinner),
+/// each with its own date/menu snapshot, so a client can be quoted for a multi-event order.
+model QuotationEvent {
+  id            String      @id @default(uuid())
+  quotationId   String
+  eventAt       DateTime?
+  eventLocation String?
+  functionType  String?
+  jamanvarType  String?
+  guestCount    Int?
+  notes         String?     @db.Text
+  status        EventStatus @default(PENDING)
+  dishId        String?
+  parentDishId  String?
+  isTemplate    Boolean?
+  eventTotal    Decimal?    @db.Decimal(12, 2)
+  eventSnapshot Json?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  quotation         Quotation                   @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  extraServiceLines QuotationExtraServiceLine[]
+
+  @@index([quotationId])
+  @@index([quotationId, eventAt])
+  @@index([eventAt])
+}
+
+/// Mirrors BookingExtraServiceLine: additional/optional services attached to one specific
+/// QuotationEvent (nullable eventId = quotation-level, unused today but kept for symmetry).
+model QuotationExtraServiceLine {
+  id                  String                  @id @default(uuid())
+  quotationId         String
+  eventId             String?
+  extraServiceId      String
+  quantity            Int                     @default(1)
+  unitPriceSnapshot   Decimal                 @db.Decimal(12, 2)
+  lineTotal           Decimal                 @db.Decimal(12, 2)
+  titleSnapshot       String
+  pricingTypeSnapshot ExtraServicePricingType
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+
+  quotation    Quotation       @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  event        QuotationEvent? @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  extraService ExtraService    @relation(fields: [extraServiceId], references: [id], onDelete: Restrict)
+
+  @@index([quotationId])
+  @@index([quotationId, eventId])
+  @@index([extraServiceId])
+}
+
 /// Caterer-owned persisted ingredient supply lists (standalone MVP; not tied to bookings unless linked).
 model SupplySavedList {
-  id               String   @id @default(uuid())
-  businessId       String
-  business         Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  createdByUserId  String?
-  createdBy        User?    @relation("SupplySavedListCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  title            String   @db.VarChar(512)
-  bookingEventId   String?
-  bookingEvent     BookingEvent? @relation(fields: [bookingEventId], references: [id], onDelete: SetNull)
-  categoriesLabel  String?  @db.VarChar(512)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  items            SupplySavedListItem[]
+  id              String                @id @default(uuid())
+  businessId      String
+  business        Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdByUserId String?
+  createdBy       User?                 @relation("SupplySavedListCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  title           String                @db.VarChar(512)
+  bookingEventId  String?
+  bookingEvent    BookingEvent?         @relation(fields: [bookingEventId], references: [id], onDelete: SetNull)
+  categoriesLabel String?               @db.VarChar(512)
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  items           SupplySavedListItem[]
 
   @@index([businessId, createdAt(sort: Desc)])
   @@index([bookingEventId])
 }
 
 model SupplySavedListItem {
-  id             String @id @default(uuid())
-  listId         String
-  list           SupplySavedList @relation(fields: [listId], references: [id], onDelete: Cascade)
-  supplyItemId   String
-  supplyItem     SupplyItem @relation(fields: [supplyItemId], references: [id], onDelete: Restrict)
-  quantity       Int
-  unit           String
-  categorySlug   String
-  nameSnapshot   Json
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id           String          @id @default(uuid())
+  listId       String
+  list         SupplySavedList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  supplyItemId String
+  supplyItem   SupplyItem      @relation(fields: [supplyItemId], references: [id], onDelete: Restrict)
+  quantity     Int
+  unit         String
+  categorySlug String
+  nameSnapshot Json
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
 
   @@index([listId])
   @@index([supplyItemId])
 }
 
 model Vendor {
-  id         String   @id @default(uuid())
-  businessId String
-  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  name       String
-  address    String?
-  whatsappNo String?
+  id           String   @id @default(uuid())
+  businessId   String
+  business     Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name         String
+  address      String?
+  whatsappNo   String?
   categorySlug String?
-  isActive   Boolean  @default(true)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   @@index([businessId, isActive])
 }
 
 model Staff {
-  id          String      @id @default(uuid())
+  id          String       @id @default(uuid())
   businessId  String
-  business    Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  business    Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
   name        String
   phone       String?
   role        StaffRole
-  dailyCharge Decimal?    @db.Decimal(12, 2)
-  status      StaffStatus @default(AVAILABLE)
-  isAvailable Boolean     @default(true)
-  isActive    Boolean     @default(true)
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+  dailyCharge Decimal?     @db.Decimal(12, 2)
+  status      StaffStatus  @default(AVAILABLE)
+  isAvailable Boolean      @default(true)
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
   assignments EventStaff[]
 
   @@index([businessId, role, isActive])
@@ -773,22 +834,23 @@ model EventStaff {
 }
 
 model ExtraService {
-  id              String                  @id @default(uuid())
+  id              String                      @id @default(uuid())
   businessId      String?
-  business        Business?               @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  business        Business?                   @relation(fields: [businessId], references: [id], onDelete: Cascade)
   createdByUserId String?
-  createdBy       User?                   @relation(fields: [createdByUserId], references: [id])
+  createdBy       User?                       @relation(fields: [createdByUserId], references: [id])
   /// false only when both businessId and createdByUserId are set; otherwise true (catalog / admin).
-  isGlobal        Boolean                 @default(false)
+  isGlobal        Boolean                     @default(false)
   title           String
-  description     String?                 @db.Text
+  description     String?                     @db.Text
   pricingType     ExtraServicePricingType
-  price           Decimal                 @db.Decimal(12, 2)
-  isOptional      Boolean                 @default(true)
-  isActive        Boolean                 @default(true)
-  createdAt       DateTime                @default(now())
-  updatedAt       DateTime                @updatedAt
+  price           Decimal                     @db.Decimal(12, 2)
+  isOptional      Boolean                     @default(true)
+  isActive        Boolean                     @default(true)
+  createdAt       DateTime                    @default(now())
+  updatedAt       DateTime                    @updatedAt
   bookingLines    BookingExtraServiceLine[]
+  quotationLines  QuotationExtraServiceLine[]
 
   @@index([businessId, isActive])
   @@index([createdByUserId])

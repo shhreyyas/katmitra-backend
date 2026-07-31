@@ -21,6 +21,7 @@ const {
   getEventSupplySummary,
   getBookingEventsSupplySummaries,
   getSuggestedEventSupplyFromMenu,
+  getFullBookingPdfSupplyBreakdown,
   createVendor,
   listVendors,
   updateVendor,
@@ -149,6 +150,12 @@ router.get(
   authMiddleware,
   businessContextMiddleware,
   getSuggestedEventSupplyFromMenu,
+);
+router.get(
+  "/v1/bookings/:id/fullPdfSupplyBreakdown",
+  authMiddleware,
+  businessContextMiddleware,
+  getFullBookingPdfSupplyBreakdown,
 );
 router.patch(
   "/v1/bookings/:id/events/:eventId/supplyItems/:supplyItemId",

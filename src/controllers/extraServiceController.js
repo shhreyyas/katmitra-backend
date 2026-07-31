@@ -71,6 +71,72 @@ function resolveTargetEventId(booking, body) {
   return null;
 }
 
+/**
+ * Resolve a raw `lines: [{extra_service_id, quantity?, unit_price?}]` array into
+ * Prisma-ready row data (unit price / line total snapshots), shared by Booking's
+ * `setBookingExtraServices` and Quotation's event-service handling so the catalog
+ * lookup + FIXED/PER_UNIT/PER_GUEST math isn't duplicated across controllers.
+ * @returns {Promise<{ rows?: object[], extrasTotal?: number, error?: string }>}
+ */
+async function resolveExtraServiceLineRows({ businessId, userId, lines, guestCount }) {
+  const serviceIds = [
+    ...new Set(
+      (lines || [])
+        .map((line) => String(line.extra_service_id ?? line.extraServiceId ?? "").trim())
+        .filter(Boolean),
+    ),
+  ];
+
+  const servicesById = new Map();
+  if (serviceIds.length > 0) {
+    const services = await prisma.extraService.findMany({
+      where: {
+        id: { in: serviceIds },
+        isActive: true,
+        OR: extraServiceVisibilityOrBranches(businessId, userId),
+      },
+    });
+    if (services.length !== serviceIds.length) {
+      return { error: "Extra service not found" };
+    }
+    for (const svc of services) servicesById.set(svc.id, svc);
+  }
+
+  const rows = [];
+  let extrasTotal = 0;
+  for (const line of lines || []) {
+    const extraServiceId = String(line.extra_service_id ?? line.extraServiceId ?? "").trim();
+    if (!extraServiceId) continue;
+    const svc = servicesById.get(extraServiceId);
+    if (!svc) return { error: "Extra service not found" };
+    const quantity =
+      svc.pricingType === "FIXED"
+        ? 1
+        : Math.max(1, parseInt(String(line.quantity ?? 1), 10) || 1);
+    const catalogUnit = num(svc.price);
+    const requestedUnit =
+      line.unit_price != null
+        ? num(line.unit_price)
+        : line.unitPrice != null
+          ? num(line.unitPrice)
+          : catalogUnit;
+    const unitPrice =
+      Number.isFinite(requestedUnit) && requestedUnit >= 0 ? requestedUnit : catalogUnit;
+    const lineTotal = computeLineTotal(svc.pricingType, unitPrice, quantity, guestCount);
+    extrasTotal += lineTotal;
+    rows.push({
+      extraServiceId,
+      quantity,
+      unitPriceSnapshot: new Prisma.Decimal(String(unitPrice)),
+      lineTotal: new Prisma.Decimal(String(lineTotal)),
+      titleSnapshot: svc.title,
+      pricingTypeSnapshot: svc.pricingType,
+    });
+  }
+
+  return { rows, extrasTotal };
+}
+
 async function recalcBookingTotalDue(bookingId) {
   const booking = await prisma.booking.findUnique({
     where: { id: bookingId },
@@ -374,4 +440,7 @@ module.exports = {
   setBookingExtraServices,
   recalcBookingTotalDue,
   serializeExtraServiceLine,
+  resolveExtraServiceLineRows,
+  extraServiceVisibilityOrBranches,
+  computeLineTotal,
 };

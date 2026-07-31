@@ -52,6 +52,7 @@ function formatBusinessDetail(business) {
     years_of_experience: business.yearsExperience,
     business_register_number: business.registrationNumber ?? "",
     gst_number: business.gstNumber ?? "",
+    terms_and_conditions: business.termsAndConditions ?? "",
     subscription: {
       status: business.subscriptionStatus ?? "trial",
       plan: business.subscriptionPlan ?? "FREE",

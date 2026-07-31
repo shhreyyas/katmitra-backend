@@ -139,6 +139,11 @@ exports.getQuotation = async (req, res) => {
           },
         },
         menuItems: true,
+        events: {
+          include: { extraServiceLines: true },
+          orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }],
+        },
+        extraServiceLines: true,
       },
     });
 

@@ -98,21 +98,47 @@ function normalizeDishRequiredIngredientsPayload(raw) {
   return out;
 }
 
-function resolveTotalRequiredIngredients(dish) {
+async function resolveTotalRequiredIngredients(dish, language) {
   const stored = readDishRequiredIngredientsStorage(dish.requiredIngredients);
   if (dish.requiredIngredientsCustomized === true || stored.customized) {
     return stored.items;
   }
-  return buildTotalRequiredIngredients(dish.menuItems || []);
+  return buildTotalRequiredIngredients(dish.menuItems || [], language);
 }
 
-function buildTotalRequiredIngredients(menuItems) {
+/** Fetches localized names for supply items referenced by `supply_item_id`, keyed by id. */
+async function fetchSupplyItemNameMap(ids, language) {
+  const uniqueIds = [...new Set(ids)];
+  if (uniqueIds.length === 0) return new Map();
+  const rows = await prisma.supplyItem.findMany({
+    where: { id: { in: uniqueIds } },
+    select: { id: true, name: true },
+  });
+  return new Map(
+    rows.map((r) => [r.id, resolveLocalizedName(r.name, language)]),
+  );
+}
+
+async function buildTotalRequiredIngredients(menuItems, language) {
+  const rows = menuItems || [];
+  const supplyItemIds = [];
+  for (const row of rows) {
+    for (const ing of parseIngredients(row.menuItem?.ingredients)) {
+      const sid = ing?.supply_item_id ?? ing?.supplyItemId;
+      if (typeof sid === "string" && sid.trim()) supplyItemIds.push(sid.trim());
+    }
+  }
+  const supplyNameById = await fetchSupplyItemNameMap(supplyItemIds, language);
+
   const buckets = new Map();
-  for (const row of menuItems || []) {
+  for (const row of rows) {
     const multiplier = Math.max(1, parseInt(String(row.quantity ?? 1), 10) || 1);
     const ingredients = parseIngredients(row.menuItem?.ingredients);
     for (const ing of ingredients) {
-      const ingredientName = String(ing?.name ?? "").trim();
+      const sid = ing?.supply_item_id ?? ing?.supplyItemId;
+      const localizedName =
+        typeof sid === "string" ? supplyNameById.get(sid.trim()) : undefined;
+      const ingredientName = (localizedName || String(ing?.name ?? "")).trim();
       if (!ingredientName) continue;
       const unit = String(ing?.unit ?? "").trim();
       const qty = num(ing?.qty);
@@ -186,14 +212,14 @@ function serializeDishListItem(dish, language) {
   };
 }
 
-function serializeDish(dish, options = {}) {
+async function serializeDish(dish, options = {}) {
   const includeComputed = options.includeComputed === true;
   const language = options.language || "en";
   const howToMake = includeComputed
     ? buildDishHowToMake(dish.menuItems || [], language)
     : undefined;
   const totalRequiredIngredients = includeComputed
-    ? resolveTotalRequiredIngredients(dish)
+    ? await resolveTotalRequiredIngredients(dish, language)
     : undefined;
   const stored = includeComputed
     ? readDishRequiredIngredientsStorage(dish.requiredIngredients)
@@ -304,7 +330,7 @@ async function getDish(req, res) {
     return successResponse(
       res,
       "OK",
-      serializeDish(row, { includeComputed: true, language: requestedLanguage }),
+      await serializeDish(row, { includeComputed: true, language: requestedLanguage }),
     );
   } catch (e) {
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
@@ -363,7 +389,7 @@ async function createDish(req, res) {
         },
       });
     });
-    return successResponse(res, "Dish created", serializeDish(dish, { language: requestedLanguage }));
+    return successResponse(res, "Dish created", await serializeDish(dish, { language: requestedLanguage }));
   } catch (e) {
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
@@ -455,7 +481,7 @@ async function updateDish(req, res) {
     return successResponse(
       res,
       "Dish updated",
-      serializeDish(updated, { includeComputed: true, language: requestedLanguage }),
+      await serializeDish(updated, { includeComputed: true, language: requestedLanguage }),
     );
   } catch (e) {
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);

@@ -48,7 +48,7 @@ function normalizeIngredients(raw) {
   return raw;
 }
 
-async function enrichIngredientsWithSupplyUnits(rawIngredients) {
+async function enrichIngredientsWithSupplyUnits(rawIngredients, language) {
   const ingredients = normalizeIngredients(rawIngredients);
   const ids = [
     ...new Set(
@@ -66,6 +66,7 @@ async function enrichIngredientsWithSupplyUnits(rawIngredients) {
     where: { id: { in: ids } },
     select: {
       id: true,
+      name: true,
       unitOptions: true,
       defaultUnit: true,
     },
@@ -79,8 +80,10 @@ async function enrichIngredientsWithSupplyUnits(rawIngredients) {
     const source = byId.get(id);
     if (!source) return row;
     const unitOptions = Array.isArray(source.unitOptions) ? source.unitOptions : [];
+    const localizedName = resolveLocalizedName(source.name, language);
     return {
       ...row,
+      name: localizedName || row.name,
       unit_options: unitOptions,
       default_unit: source.defaultUnit ?? null,
       supply_item: {
@@ -622,7 +625,10 @@ exports.listMenuItems = async (req, res) => {
           includeFinancials: true,
           language: requestedLanguage,
         });
-        item.ingredients = await enrichIngredientsWithSupplyUnits(item.ingredients);
+        item.ingredients = await enrichIngredientsWithSupplyUnits(
+          item.ingredients,
+          requestedLanguage,
+        );
         return item;
       }),
     );
@@ -679,7 +685,10 @@ exports.getMenuItem = async (req, res) => {
       includeFinancials: true,
       language: requestedLanguage,
     });
-    payload.ingredients = await enrichIngredientsWithSupplyUnits(payload.ingredients);
+    payload.ingredients = await enrichIngredientsWithSupplyUnits(
+      payload.ingredients,
+      requestedLanguage,
+    );
 
     return successResponse(
       res,

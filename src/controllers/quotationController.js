@@ -2,6 +2,25 @@ const prisma = require("../config/prisma");
 const { Prisma } = require("@prisma/client");
 const { successResponse, errorResponse } = require("../utils/response");
 const { getRequestedLanguage, resolveLocalizedName } = require("../utils/localization");
+const {
+  computeQuotationTotalFromEvents,
+  deriveQuotationEventFoodSubtotal,
+} = require("./quotationPricingHelpers");
+const { resolveExtraServiceLineRows } = require("./extraServiceController");
+
+function serializeQuotationExtraServiceLine(row) {
+  return {
+    id: row.id,
+    quotation_id: row.quotationId,
+    event_id: row.eventId ?? null,
+    extra_service_id: row.extraServiceId,
+    quantity: row.quantity,
+    unit_price_snapshot: num(row.unitPriceSnapshot),
+    line_total: num(row.lineTotal),
+    title_snapshot: row.titleSnapshot,
+    pricing_type_snapshot: row.pricingTypeSnapshot,
+  };
+}
 
 function deriveIsGlobal(businessId, createdByUserId) {
   if (businessId == null || businessId === "") return true;
@@ -48,17 +67,6 @@ function parseQuotationStatus(bodyStatus, fallback = "SALE") {
   return fallback;
 }
 
-function computeQuotationPricing(rows, guestCount, discount, servicePct, taxPct) {
-  const guests = Math.max(0, Math.floor(Number(guestCount) || 0));
-  const perPlateTotal = rows.reduce((s, r) => s + num(r.pricePerPlateSnapshot), 0);
-  const subtotal = perPlateTotal * guests;
-  const serviceChargeAmount = subtotal * (servicePct / 100);
-  const taxAmount = subtotal * (taxPct / 100);
-  const disc = Math.max(0, num(discount));
-  const total = Math.max(0, subtotal + serviceChargeAmount + taxAmount - disc);
-  return { subtotal, serviceChargeAmount, taxAmount, total };
-}
-
 /**
  * Build quotation menu snapshot rows from optional `body.menu_items`, else catalog prices.
  * @returns {{ rows: { menuItemId: string, pricePerPlateSnapshot: number, nameSnapshot: string }[] } | { error: string }}
@@ -100,7 +108,66 @@ function buildSnapRowsFromMenuItemsOrCatalog(body, menus, requestedLanguage) {
   return { rows };
 }
 
+/** First event in `body.events[]`, if any — source of the legacy flat-field mirror. */
+function firstEventFromBody(body) {
+  return Array.isArray(body.events) && body.events.length > 0 ? body.events[0] : null;
+}
+
+/**
+ * Legacy `menu_item_ids`/`menu_items` derived from `events[0].event_snapshot.menu_items`
+ * when the request uses the new nested-events shape and doesn't also send the flat
+ * fields directly — keeps `QuotationMenuItem` (the pre-existing flat mirror table) and
+ * `Quotation.eventDate/guestCount/functionType` populated exactly like before.
+ */
+function legacyMenuFieldsFromBody(body) {
+  if (Array.isArray(body.menu_item_ids)) {
+    return { menu_item_ids: body.menu_item_ids, menu_items: body.menu_items };
+  }
+  const first = firstEventFromBody(body);
+  const snapMenuItems = first?.event_snapshot?.menu_items;
+  if (!Array.isArray(snapMenuItems) || snapMenuItems.length === 0) {
+    return { menu_item_ids: [], menu_items: undefined };
+  }
+  return {
+    menu_item_ids: snapMenuItems.map((r) => r.id),
+    menu_items: snapMenuItems.map((r) => ({
+      menu_item_id: r.id,
+      price_per_plate_snapshot: num(first.event_snapshot.price_per_plate),
+      name_snapshot: r.name ?? null,
+    })),
+  };
+}
+
+function serializeQuotationEvent(ev) {
+  return {
+    id: ev.id,
+    quotation_id: ev.quotationId,
+    event_at: ev.eventAt?.toISOString?.() ?? ev.eventAt ?? null,
+    event_location: ev.eventLocation ?? null,
+    jamanvar_type: ev.jamanvarType ?? null,
+    function_type: ev.functionType ?? null,
+    guest_count: ev.guestCount ?? null,
+    notes: ev.notes ?? null,
+    status: ev.status ?? "PENDING",
+    dish_id: ev.dishId ?? null,
+    parent_dish_id: ev.parentDishId ?? null,
+    is_template: ev.isTemplate ?? null,
+    event_total: ev.eventTotal != null ? num(ev.eventTotal) : null,
+    event_subtotal: deriveQuotationEventFoodSubtotal(ev),
+    event_snapshot: ev.eventSnapshot ?? null,
+    extra_service_lines: (ev.extraServiceLines || []).map(serializeQuotationExtraServiceLine),
+    created_at: ev.createdAt?.toISOString?.() ?? ev.createdAt,
+    updated_at: ev.updatedAt?.toISOString?.() ?? ev.updatedAt,
+  };
+}
+
 function serializeQuotation(q) {
+  const serializedEvents = (q.events || []).map(serializeQuotationEvent);
+  const first = serializedEvents[0];
+
+  const extraServiceLines = (q.extraServiceLines || []).map(serializeQuotationExtraServiceLine);
+  const extraCharges = extraServiceLines.reduce((s, l) => s + num(l.line_total), 0);
+
   return {
     id: q.id,
     business_id: q.businessId,
@@ -108,8 +175,10 @@ function serializeQuotation(q) {
     client_name: q.clientName,
     client_phone: q.clientPhone ?? null,
     function_type: q.functionType ?? null,
-    event_date: q.eventDate?.toISOString?.() ?? q.eventDate,
-    guest_count: q.guestCount,
+    // Legacy mirror of events[0] — kept in sync so older callers / the Schedule tab's
+    // date filter (which queries this column directly) keep working unmodified.
+    event_date: first?.event_at ?? (q.eventDate?.toISOString?.() ?? q.eventDate),
+    guest_count: first?.guest_count ?? q.guestCount,
     discount_amount: num(q.discountAmount),
     service_charge_pct: num(q.serviceChargePct),
     tax_pct: num(q.taxPct),
@@ -124,9 +193,75 @@ function serializeQuotation(q) {
       price_per_plate_snapshot: num(mi.pricePerPlateSnapshot),
       name_snapshot: mi.nameSnapshot,
     })),
+    events: serializedEvents,
+    extra_service_lines: extraServiceLines,
+    extra_charges: extraCharges,
+    converted_booking_id: q.convertedBookingId ?? null,
+    converted_at: q.convertedAt?.toISOString?.() ?? q.convertedAt ?? null,
     created_at: q.createdAt?.toISOString?.() ?? q.createdAt,
     updated_at: q.updatedAt?.toISOString?.() ?? q.updatedAt,
   };
+}
+
+const quotationInclude = {
+  menuItems: true,
+  events: {
+    include: { extraServiceLines: true },
+    orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }],
+  },
+  extraServiceLines: true,
+};
+
+/**
+ * Creates QuotationEvent + (per-event) QuotationExtraServiceLine rows for `events[]`
+ * inside an open transaction. Events are created one at a time (not `createMany`)
+ * because each event's service lines need its freshly-assigned id.
+ */
+async function createQuotationEventsInTx(tx, { businessId, userId, quotationId, events }) {
+  for (const ev of events) {
+    const created = await tx.quotationEvent.create({
+      data: {
+        quotationId,
+        eventAt: ev.event_at ? new Date(ev.event_at) : null,
+        eventLocation: ev.event_location ?? null,
+        functionType: ev.function_type ?? null,
+        jamanvarType:
+          ev.jamanvar_type != null && String(ev.jamanvar_type).trim() !== ""
+            ? String(ev.jamanvar_type).trim()
+            : null,
+        guestCount: ev.guest_count != null ? parseInt(ev.guest_count, 10) : null,
+        notes: ev.notes ?? null,
+        status: ev.status ?? "PENDING",
+        dishId: ev.dish_id ?? null,
+        parentDishId: ev.parent_dish_id ?? null,
+        isTemplate: ev.is_template ?? null,
+        eventSnapshot: ev.event_snapshot ?? null,
+        eventTotal: ev.event_total != null ? new Prisma.Decimal(String(ev.event_total)) : null,
+      },
+    });
+
+    const lines = Array.isArray(ev.extra_service_lines) ? ev.extra_service_lines : [];
+    if (lines.length === 0) continue;
+
+    const guestCount = Math.max(0, Number(created.guestCount) || 0);
+    const resolved = await resolveExtraServiceLineRows({
+      businessId,
+      userId,
+      lines,
+      guestCount,
+    });
+    if (resolved.error) return { error: resolved.error };
+    if (resolved.rows.length > 0) {
+      await tx.quotationExtraServiceLine.createMany({
+        data: resolved.rows.map((r) => ({
+          ...r,
+          quotationId,
+          eventId: created.id,
+        })),
+      });
+    }
+  }
+  return {};
 }
 
 async function createQuotation(req, res) {
@@ -144,9 +279,13 @@ async function createQuotation(req, res) {
       return errorResponse(res, "Business not found", 404, "NOT_FOUND");
     }
 
-    const menuItemIds = Array.isArray(body.menu_item_ids) ? body.menu_item_ids : [];
+    const events = Array.isArray(body.events) ? body.events : [];
+    const firstEvent = events[0] ?? null;
+    const legacyMenu = legacyMenuFieldsFromBody(body);
+
+    const menuItemIds = Array.isArray(legacyMenu.menu_item_ids) ? legacyMenu.menu_item_ids : [];
     const ids = [...new Set(menuItemIds.map((x) => String(x)))];
-    const menus = await prisma.menuItem.findMany({ where: { id: { in: ids } } });
+    const menus = ids.length ? await prisma.menuItem.findMany({ where: { id: { in: ids } } }) : [];
     if (menus.length !== ids.length) {
       return errorResponse(res, "One or more menu items not found", 422, "VALIDATION_ERROR");
     }
@@ -158,23 +297,25 @@ async function createQuotation(req, res) {
 
     const sc = num(body.service_charge_pct ?? business.defaultServiceChargePct);
     const txp = num(body.tax_pct ?? business.defaultTaxPct);
-    const guests = parseInt(body.guest_count, 10) || 0;
+    const guests =
+      firstEvent?.guest_count != null
+        ? parseInt(firstEvent.guest_count, 10)
+        : parseInt(body.guest_count, 10) || 0;
     const discount = num(body.discount_amount ?? 0);
 
-    const snapBuilt = buildSnapRowsFromMenuItemsOrCatalog(body, menus, requestedLanguage);
+    const snapBuilt = buildSnapRowsFromMenuItemsOrCatalog(
+      { menu_items: legacyMenu.menu_items },
+      menus,
+      requestedLanguage,
+    );
     if (snapBuilt.error) {
       return errorResponse(res, snapBuilt.error, 422, "VALIDATION_ERROR");
     }
-    const snapRowsForPricing = snapBuilt.rows.map((r) => ({
-      pricePerPlateSnapshot: r.pricePerPlateSnapshot,
-    }));
-    const pricing = computeQuotationPricing(snapRowsForPricing, guests, discount, sc, txp);
     const status = parseQuotationStatus(body.status, "SALE");
     const platePriceVal = parsePlatePrice(body);
-    const platePriceDecimal =
-      platePriceVal == null ? null : new Prisma.Decimal(String(platePriceVal));
+    const platePriceDecimal = platePriceVal == null ? null : new Prisma.Decimal(String(platePriceVal));
 
-    const q = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const created = await tx.quotation.create({
         data: {
           businessId,
@@ -186,18 +327,22 @@ async function createQuotation(req, res) {
               ? String(body.client_phone).trim()
               : null,
           functionType:
-            body.function_type != null && String(body.function_type).trim() !== ""
-              ? String(body.function_type).trim()
+            (firstEvent?.function_type ?? body.function_type) != null &&
+            String(firstEvent?.function_type ?? body.function_type).trim() !== ""
+              ? String(firstEvent?.function_type ?? body.function_type).trim()
               : null,
-          eventDate: body.event_date ? new Date(body.event_date) : null,
+          eventDate: (firstEvent?.event_at ?? body.event_date)
+            ? new Date(firstEvent?.event_at ?? body.event_date)
+            : null,
           guestCount: guests,
           discountAmount: new Prisma.Decimal(String(discount)),
           serviceChargePct: new Prisma.Decimal(String(sc)),
           taxPct: new Prisma.Decimal(String(txp)),
-          subtotal: new Prisma.Decimal(String(pricing.subtotal)),
-          serviceChargeAmount: new Prisma.Decimal(String(pricing.serviceChargeAmount)),
-          taxAmount: new Prisma.Decimal(String(pricing.taxAmount)),
-          total: new Prisma.Decimal(String(pricing.total)),
+          // Placeholder; recomputed from events below once created.
+          subtotal: new Prisma.Decimal("0"),
+          serviceChargeAmount: new Prisma.Decimal("0"),
+          taxAmount: new Prisma.Decimal("0"),
+          total: new Prisma.Decimal("0"),
         },
       });
 
@@ -211,14 +356,44 @@ async function createQuotation(req, res) {
         await tx.quotationMenuItem.createMany({ data: rows });
       }
 
-      return tx.quotation.findUnique({
+      if (events.length > 0) {
+        const evResult = await createQuotationEventsInTx(tx, {
+          businessId,
+          userId,
+          quotationId: created.id,
+          events,
+        });
+        if (evResult.error) throw new Error(`__VALIDATION__${evResult.error}`);
+      }
+
+      const withEvents = await tx.quotation.findUnique({
         where: { id: created.id },
-        include: { menuItems: true },
+        include: quotationInclude,
+      });
+      const pricing = computeQuotationTotalFromEvents(withEvents);
+
+      return tx.quotation.update({
+        where: { id: created.id },
+        data: {
+          subtotal: new Prisma.Decimal(String(pricing.subtotal)),
+          serviceChargeAmount: new Prisma.Decimal(String(pricing.serviceChargeAmount)),
+          taxAmount: new Prisma.Decimal(String(pricing.taxAmount)),
+          total: new Prisma.Decimal(String(pricing.total)),
+        },
+        include: quotationInclude,
       });
     });
 
-    return successResponse(res, "Quotation created", serializeQuotation(q));
+    return successResponse(res, "Quotation created", serializeQuotation(result));
   } catch (e) {
+    if (typeof e.message === "string" && e.message.startsWith("__VALIDATION__")) {
+      return errorResponse(
+        res,
+        e.message.replace("__VALIDATION__", ""),
+        404,
+        "NOT_FOUND",
+      );
+    }
     console.error("createQuotation:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
@@ -236,7 +411,7 @@ async function listQuotations(req, res) {
         orderBy: { updatedAt: "desc" },
         take,
         skip,
-        include: { menuItems: true },
+        include: quotationInclude,
       }),
       prisma.quotation.count({ where: { businessId } }),
     ]);
@@ -257,7 +432,7 @@ async function getQuotation(req, res) {
     const id = req.params.id;
     const row = await prisma.quotation.findFirst({
       where: { id, businessId },
-      include: { menuItems: true },
+      include: quotationInclude,
     });
     if (!row) {
       return errorResponse(res, "Quotation not found", 404, "NOT_FOUND");
@@ -279,21 +454,28 @@ async function updateQuotation(req, res) {
 
     const existing = await prisma.quotation.findFirst({
       where: { id, businessId },
-      include: { menuItems: true },
+      include: quotationInclude,
     });
     if (!existing) {
       return errorResponse(res, "Quotation not found", 404, "NOT_FOUND");
     }
 
-    const business = await prisma.business.findUnique({
-      where: { id: businessId },
-      select: { defaultServiceChargePct: true, defaultTaxPct: true },
-    });
+    const eventsProvided = Array.isArray(body.events);
+    const events = eventsProvided ? body.events : [];
+    const firstEvent = events[0] ?? null;
 
     let menus = [];
-    if (Array.isArray(body.menu_item_ids)) {
-      const menuItemIds = [...new Set(body.menu_item_ids.map((x) => String(x)))];
-      menus = await prisma.menuItem.findMany({ where: { id: { in: menuItemIds } } });
+    const legacyMenu = eventsProvided ? legacyMenuFieldsFromBody(body) : null;
+    const menuIdsToResolve = eventsProvided
+      ? legacyMenu.menu_item_ids
+      : Array.isArray(body.menu_item_ids)
+        ? body.menu_item_ids
+        : null;
+    if (Array.isArray(menuIdsToResolve)) {
+      const menuItemIds = [...new Set(menuIdsToResolve.map((x) => String(x)))];
+      menus = menuItemIds.length
+        ? await prisma.menuItem.findMany({ where: { id: { in: menuItemIds } } })
+        : [];
       if (menus.length !== menuItemIds.length) {
         return errorResponse(res, "One or more menu items not found", 422, "VALIDATION_ERROR");
       }
@@ -305,32 +487,33 @@ async function updateQuotation(req, res) {
     }
 
     const guests =
-      body.guest_count != null ? parseInt(body.guest_count, 10) : existing.guestCount;
+      firstEvent?.guest_count != null
+        ? parseInt(firstEvent.guest_count, 10)
+        : body.guest_count != null
+          ? parseInt(body.guest_count, 10)
+          : existing.guestCount;
     const discount = body.discount_amount != null ? num(body.discount_amount) : num(existing.discountAmount);
     const sc =
       body.service_charge_pct != null ? num(body.service_charge_pct) : num(existing.serviceChargePct);
     const txp = body.tax_pct != null ? num(body.tax_pct) : num(existing.taxPct);
 
-    let snapRows;
     let snapBuiltForTx = null;
-    if (menus.length) {
-      const snapBuilt = buildSnapRowsFromMenuItemsOrCatalog(body, menus, requestedLanguage);
+    if (menus.length || (eventsProvided && legacyMenu.menu_item_ids.length === 0)) {
+      const snapBuilt = buildSnapRowsFromMenuItemsOrCatalog(
+        { menu_items: eventsProvided ? legacyMenu.menu_items : body.menu_items },
+        menus,
+        requestedLanguage,
+      );
       if (snapBuilt.error) {
         return errorResponse(res, snapBuilt.error, 422, "VALIDATION_ERROR");
       }
       snapBuiltForTx = snapBuilt;
-      snapRows = snapBuilt.rows.map((r) => ({ pricePerPlateSnapshot: r.pricePerPlateSnapshot }));
-    } else {
-      snapRows = existing.menuItems.map((mi) => ({
-        pricePerPlateSnapshot: mi.pricePerPlateSnapshot,
-      }));
     }
-    const pricing = computeQuotationPricing(snapRows, guests, discount, sc, txp);
 
     const platePricePatch = parsePlatePrice(body);
 
-    const updated = await prisma.$transaction(async (tx) => {
-      if (menus.length && snapBuiltForTx) {
+    const result = await prisma.$transaction(async (tx) => {
+      if (snapBuiltForTx) {
         await tx.quotationMenuItem.deleteMany({ where: { quotationId: id } });
         const rows = snapBuiltForTx.rows.map((r) => ({
           quotationId: id,
@@ -341,15 +524,27 @@ async function updateQuotation(req, res) {
         if (rows.length) await tx.quotationMenuItem.createMany({ data: rows });
       }
 
-      return tx.quotation.update({
+      if (eventsProvided) {
+        await tx.quotationExtraServiceLine.deleteMany({ where: { quotationId: id } });
+        await tx.quotationEvent.deleteMany({ where: { quotationId: id } });
+        if (events.length > 0) {
+          const evResult = await createQuotationEventsInTx(tx, {
+            businessId,
+            userId,
+            quotationId: id,
+            events,
+          });
+          if (evResult.error) throw new Error(`__VALIDATION__${evResult.error}`);
+        }
+      }
+
+      await tx.quotation.update({
         where: { id },
         data: {
           ...(platePricePatch !== undefined
             ? {
                 platePrice:
-                  platePricePatch === null
-                    ? null
-                    : new Prisma.Decimal(String(platePricePatch)),
+                  platePricePatch === null ? null : new Prisma.Decimal(String(platePricePatch)),
               }
             : {}),
           ...(body.status !== undefined
@@ -363,32 +558,53 @@ async function updateQuotation(req, res) {
                 : null
               : existing.clientPhone,
           functionType:
-            body.function_type !== undefined
-              ? body.function_type != null && String(body.function_type).trim() !== ""
-                ? String(body.function_type).trim()
+            (firstEvent?.function_type ?? body.function_type) !== undefined
+              ? (firstEvent?.function_type ?? body.function_type) != null &&
+                String(firstEvent?.function_type ?? body.function_type).trim() !== ""
+                ? String(firstEvent?.function_type ?? body.function_type).trim()
                 : null
               : existing.functionType,
           eventDate:
-            body.event_date !== undefined
-              ? body.event_date
-                ? new Date(body.event_date)
+            (firstEvent?.event_at ?? body.event_date) !== undefined
+              ? (firstEvent?.event_at ?? body.event_date)
+                ? new Date(firstEvent?.event_at ?? body.event_date)
                 : null
               : existing.eventDate,
           guestCount: guests,
           discountAmount: new Prisma.Decimal(String(discount)),
           serviceChargePct: new Prisma.Decimal(String(sc)),
           taxPct: new Prisma.Decimal(String(txp)),
+        },
+      });
+
+      const withEvents = await tx.quotation.findUnique({
+        where: { id },
+        include: quotationInclude,
+      });
+      const pricing = computeQuotationTotalFromEvents(withEvents);
+
+      return tx.quotation.update({
+        where: { id },
+        data: {
           subtotal: new Prisma.Decimal(String(pricing.subtotal)),
           serviceChargeAmount: new Prisma.Decimal(String(pricing.serviceChargeAmount)),
           taxAmount: new Prisma.Decimal(String(pricing.taxAmount)),
           total: new Prisma.Decimal(String(pricing.total)),
         },
-        include: { menuItems: true },
+        include: quotationInclude,
       });
     });
 
-    return successResponse(res, "Quotation updated", serializeQuotation(updated));
+    return successResponse(res, "Quotation updated", serializeQuotation(result));
   } catch (e) {
+    if (typeof e.message === "string" && e.message.startsWith("__VALIDATION__")) {
+      return errorResponse(
+        res,
+        e.message.replace("__VALIDATION__", ""),
+        404,
+        "NOT_FOUND",
+      );
+    }
     console.error("updateQuotation:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
@@ -412,11 +628,138 @@ async function deleteQuotation(req, res) {
   }
 }
 
+/**
+ * POST /v1/quotations/:id/convertToBooking — client approved the quotation; turn it
+ * into a real Booking, copying every event (with its menu snapshot) and every
+ * per-event extra-service line. Idempotent: calling this twice returns the same Booking.
+ */
+async function convertQuotationToBooking(req, res) {
+  try {
+    const businessId = req.businessId;
+    const id = req.params.id;
+
+    const existing = await prisma.quotation.findFirst({
+      where: { id, businessId },
+      include: quotationInclude,
+    });
+    if (!existing) {
+      return errorResponse(res, "Quotation not found", 404, "NOT_FOUND");
+    }
+
+    // Lazily required to avoid a require-cycle at module load time
+    // (bookingController also requires quotationController-adjacent helpers indirectly).
+    const {
+      serializeBooking,
+      loadBookingForBusiness,
+      generateUniqueBookingCode,
+    } = require("./bookingController");
+    const { computeBookingTotalDueFromEvents } = require("./bookingPricingHelpers");
+
+    if (existing.convertedBookingId) {
+      const already = await loadBookingForBusiness(existing.convertedBookingId, businessId, {
+        includePayments: false,
+      });
+      if (already) {
+        return successResponse(res, "Already converted", serializeBooking(already));
+      }
+    }
+
+    const newBookingId = await prisma.$transaction(async (tx) => {
+      const bookingCode = await generateUniqueBookingCode(tx, businessId);
+      const firstEvent = existing.events[0] ?? null;
+
+      const booking = await tx.booking.create({
+        data: {
+          businessId,
+          status: "DRAFT",
+          bookingCode,
+          customerName: existing.clientName,
+          customerPhone: existing.clientPhone,
+          eventAt: firstEvent?.eventAt ?? existing.eventDate,
+          eventLocation: firstEvent?.eventLocation ?? null,
+          functionType: firstEvent?.functionType ?? existing.functionType,
+          guestCount: firstEvent?.guestCount ?? existing.guestCount,
+          discountAmount: existing.discountAmount,
+          serviceChargePct: existing.serviceChargePct,
+          taxPct: existing.taxPct,
+        },
+      });
+
+      const eventIdMap = new Map();
+      for (const ev of existing.events) {
+        const created = await tx.bookingEvent.create({
+          data: {
+            bookingId: booking.id,
+            eventAt: ev.eventAt,
+            eventLocation: ev.eventLocation,
+            jamanvarType: ev.jamanvarType,
+            guestCount: ev.guestCount,
+            notes: ev.notes,
+            status: "PENDING",
+            dishId: ev.dishId,
+            parentDishId: ev.parentDishId,
+            isTemplate: ev.isTemplate,
+            eventSnapshot: ev.eventSnapshot,
+            eventTotal: ev.eventTotal,
+          },
+          select: { id: true },
+        });
+        eventIdMap.set(ev.id, created.id);
+      }
+
+      if (existing.extraServiceLines.length) {
+        await tx.bookingExtraServiceLine.createMany({
+          data: existing.extraServiceLines.map((l) => ({
+            bookingId: booking.id,
+            eventId: l.eventId ? (eventIdMap.get(l.eventId) ?? null) : null,
+            extraServiceId: l.extraServiceId,
+            quantity: l.quantity,
+            unitPriceSnapshot: l.unitPriceSnapshot,
+            lineTotal: l.lineTotal,
+            titleSnapshot: l.titleSnapshot,
+            pricingTypeSnapshot: l.pricingTypeSnapshot,
+          })),
+        });
+      }
+
+      const withEvents = await tx.booking.findUnique({
+        where: { id: booking.id },
+        include: { events: true, extraServiceLines: true },
+      });
+      const totalDue = computeBookingTotalDueFromEvents(withEvents);
+      await tx.booking.update({
+        where: { id: booking.id },
+        data: {
+          totalDue: new Prisma.Decimal(String(totalDue)),
+          subtotal: new Prisma.Decimal(String(totalDue)),
+          paymentStatus: "PENDING",
+        },
+      });
+
+      await tx.quotation.update({
+        where: { id },
+        data: { status: "ACCEPTED", convertedBookingId: booking.id, convertedAt: new Date() },
+      });
+
+      return booking.id;
+    });
+
+    const newBooking = await loadBookingForBusiness(newBookingId, businessId, {
+      includePayments: false,
+    });
+    return successResponse(res, "Quotation converted to booking", serializeBooking(newBooking));
+  } catch (e) {
+    console.error("convertQuotationToBooking:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
 module.exports = {
   createQuotation,
   listQuotations,
   getQuotation,
   updateQuotation,
   deleteQuotation,
+  convertQuotationToBooking,
   serializeQuotation,
 };
