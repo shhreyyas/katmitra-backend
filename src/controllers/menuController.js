@@ -937,6 +937,28 @@ exports.updateMenuItem = async (req, res) => {
     }
 
     if (deriveIsGlobal(menu.businessId, menu.createdByUserId)) {
+      const existingFork = await prisma.menuItem.findFirst({
+        where: { parentMenuId: menu.id, businessId, createdByUserId: userId },
+      });
+
+      if (existingFork) {
+        const updatedFork = await prisma.menuItem.update({
+          where: { id: existingFork.id },
+          data: updates,
+          include: { category: true },
+        });
+
+        return successResponse(
+          res,
+          "Menu item updated successfully",
+          formatMenuItem(updatedFork, {
+            includeFinancials: false,
+            language: requestedLanguage,
+          }),
+          200,
+        );
+      }
+
       const newItem = await prisma.menuItem.create({
         data: {
           name: updates.name ?? menu.name,
