@@ -15,7 +15,8 @@
  */
 
 const prisma = require("../config/prisma");
-const { sendPushNotifications } = require("../utils/expoPush");
+const { sendGroupedNotification } = require("../utils/notificationLocalization");
+const { getNotificationContent, buildForSuffix } = require("../utils/notificationTranslations");
 
 const REMINDER_TYPE  = "no_events";
 const WINDOW_MINUTES = 15;
@@ -52,7 +53,7 @@ async function processBookingNoEventsReminder() {
           select: {
             users: {
               where: { notificationStatus: 1, deviceToken: { not: null }, deletedAt: null },
-              select: { id: true, deviceToken: true },
+              select: { id: true, deviceToken: true, language: true },
             },
           },
         },
@@ -75,13 +76,11 @@ async function processBookingNoEventsReminder() {
   let notified = 0, failed = 0, skipped = 0;
 
   for (const booking of bookings) {
-    const users  = booking.business.users;
-    const tokens = users.map((u) => u.deviceToken).filter(Boolean);
-    const userIds = users.map((u) => u.id);
+    const users = booking.business.users.filter((u) => u.deviceToken);
 
-    if (tokens.length === 0) { skipped++; continue; }
+    if (users.length === 0) { skipped++; continue; }
 
-    const ok = await _sendBookingNoEventsReminder(booking, userIds, tokens);
+    const ok = await _sendBookingNoEventsReminder(booking, users);
     if (ok) notified++;
     else    failed++;
   }
@@ -97,38 +96,25 @@ async function processBookingNoEventsReminder() {
  *
  * @returns {Promise<boolean>}
  */
-async function _sendBookingNoEventsReminder(booking, userIds, tokens) {
-  const customerPart = booking.customerName ? ` for ${booking.customerName}` : "";
-  const title = "Don't forget your events! 📅";
-  const body  = `You created a booking${customerPart} but haven't added any events yet. Tap to add events now.`;
+async function _sendBookingNoEventsReminder(booking, users) {
   const notifData = { screen: "selectEvent", bookingId: booking.id };
 
-  // Step 1: persist inbox records before push so they exist when the user taps the banner.
-  try {
-    await prisma.userNotification.createMany({
-      data: userIds.map((userId) => ({
-        userId,
-        title,
-        body,
-        type: "booking_no_events",
-        data: notifData,
-      })),
-    });
-  } catch (err) {
-    console.error(`[BookingNoEvents] Inbox createMany failed for booking ${booking.id}:`, err.message);
-    return false;
-  }
-
-  // Step 2: send push
   let pushResult;
   try {
-    pushResult = await sendPushNotifications(tokens, { title, body, data: notifData });
+    pushResult = await sendGroupedNotification(
+      users,
+      (lang) => getNotificationContent("bookingNoEvents", lang, {
+        forSuffix: buildForSuffix(lang, booking.customerName),
+      }),
+      notifData,
+      "booking_no_events",
+    );
   } catch (err) {
-    console.error(`[BookingNoEvents] Push failed for booking ${booking.id}:`, err.message);
+    console.error(`[BookingNoEvents] sendGroupedNotification threw for booking ${booking.id}:`, err.message);
     return false;
   }
 
-  const delivered = pushResult.successCount > 0 || pushResult.skippedCount === tokens.length;
+  const delivered = pushResult.successCount > 0 || pushResult.skippedCount === users.length;
   if (!delivered) {
     console.warn(
       `[BookingNoEvents] Push delivery failed for booking ${booking.id} ` +

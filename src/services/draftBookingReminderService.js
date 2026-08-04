@@ -10,7 +10,8 @@
  */
 
 const prisma = require("../config/prisma");
-const { sendPushNotifications } = require("../utils/expoPush");
+const { sendGroupedNotification } = require("../utils/notificationLocalization");
+const { getNotificationContent, buildForSuffix } = require("../utils/notificationTranslations");
 
 const WINDOW_MINUTES = 15;
 const DAYS_BEFORE    = 3;
@@ -44,7 +45,7 @@ async function _fetchDraftBookings(windowStart, windowEnd, reminderType) {
         select: {
           users: {
             where:  USER_FILTER,
-            select: { id: true, deviceToken: true },
+            select: { id: true, deviceToken: true, language: true },
           },
         },
       },
@@ -52,27 +53,23 @@ async function _fetchDraftBookings(windowStart, windowEnd, reminderType) {
   });
 }
 
-async function _notify(booking, userIds, tokens, title, body, type, reminderType) {
+async function _notify(booking, users, messageId, params, type, reminderType) {
   const notifData = { screen: "bookingDetails", bookingId: booking.id };
-
-  try {
-    await prisma.userNotification.createMany({
-      data: userIds.map((userId) => ({ userId, title, body, type, data: notifData })),
-    });
-  } catch (err) {
-    console.error(`[DraftReminder:${reminderType}] Inbox failed for ${booking.id}:`, err.message);
-    return false;
-  }
 
   let pushResult;
   try {
-    pushResult = await sendPushNotifications(tokens, { title, body, data: notifData });
+    pushResult = await sendGroupedNotification(
+      users,
+      (lang) => getNotificationContent(messageId, lang, { forSuffix: buildForSuffix(lang, params.customerName) }),
+      notifData,
+      type,
+    );
   } catch (err) {
-    console.error(`[DraftReminder:${reminderType}] Push failed for ${booking.id}:`, err.message);
+    console.error(`[DraftReminder:${reminderType}] sendGroupedNotification threw for ${booking.id}:`, err.message);
     return false;
   }
 
-  const delivered = pushResult.successCount > 0 || pushResult.skippedCount === tokens.length;
+  const delivered = pushResult.successCount > 0 || pushResult.skippedCount === users.length;
   if (!delivered) {
     console.warn(`[DraftReminder:${reminderType}] Delivery failed for ${booking.id} — will retry`);
     return false;
@@ -95,7 +92,7 @@ async function _notify(booking, userIds, tokens, title, body, type, reminderType
   return true;
 }
 
-async function _runReminder(windowStart, windowEnd, reminderType, title, bodyFn, notifType) {
+async function _runReminder(windowStart, windowEnd, reminderType, messageId, notifType) {
   let bookings;
   try {
     bookings = await _fetchDraftBookings(windowStart, windowEnd, reminderType);
@@ -111,13 +108,11 @@ async function _runReminder(windowStart, windowEnd, reminderType, title, bodyFn,
   let notified = 0, failed = 0, skipped = 0;
 
   for (const b of bookings) {
-    const users   = b.business.users;
-    const tokens  = users.map((u) => u.deviceToken).filter(Boolean);
-    const userIds = users.map((u) => u.id);
+    const users = b.business.users.filter((u) => u.deviceToken);
 
-    if (tokens.length === 0) { skipped++; continue; }
+    if (users.length === 0) { skipped++; continue; }
 
-    const ok = await _notify(b, userIds, tokens, title, bodyFn(b), notifType, reminderType);
+    const ok = await _notify(b, users, messageId, { customerName: b.customerName }, notifType, reminderType);
     if (ok) notified++;
     else    failed++;
   }
@@ -130,14 +125,7 @@ async function _runReminder(windowStart, windowEnd, reminderType, title, bodyFn,
  */
 async function processDraftBookingExpiringReminder() {
   const { windowStart, windowEnd } = _buildWindow(DAYS_BEFORE * 24 * 60 * 60_000);
-  return _runReminder(
-    windowStart,
-    windowEnd,
-    "draft_expiring_3d",
-    "Draft booking event coming up! 📝",
-    (b) => `You have a draft booking${b.customerName ? ' for ' + b.customerName : ''} with an event in 3 days. Confirm it now.`,
-    "draft_expiring",
-  );
+  return _runReminder(windowStart, windowEnd, "draft_expiring_3d", "draftUpcoming", "draft_expiring");
 }
 
 /**
@@ -145,14 +133,7 @@ async function processDraftBookingExpiringReminder() {
  */
 async function processDraftBookingExpiredReminder() {
   const { windowStart, windowEnd } = _buildWindow(-DAYS_AFTER * 24 * 60 * 60_000);
-  return _runReminder(
-    windowStart,
-    windowEnd,
-    "draft_expired_1d",
-    "Draft booking event has passed 📝",
-    (b) => `The event date for your draft booking${b.customerName ? ' for ' + b.customerName : ''} has passed. Please review or close it.`,
-    "draft_expired",
-  );
+  return _runReminder(windowStart, windowEnd, "draft_expired_1d", "draftPassed", "draft_expired");
 }
 
 module.exports = { processDraftBookingExpiringReminder, processDraftBookingExpiredReminder };

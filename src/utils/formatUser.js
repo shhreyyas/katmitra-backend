@@ -50,6 +50,7 @@ function formatUserResponse(user, overrides = {}) {
     updated_at: user.updatedAt,
     deleted_at: user.deletedAt ?? null,
     role: user.role,
+    language: user.language,
     ...overrides,
   };
 }

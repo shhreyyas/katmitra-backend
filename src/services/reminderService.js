@@ -21,7 +21,8 @@
  */
 
 const prisma = require("../config/prisma");
-const { sendPushNotifications } = require("../utils/expoPush");
+const { sendGroupedNotification } = require("../utils/notificationLocalization");
+const { getNotificationContent, buildForSuffix, buildEventDatePhrase } = require("../utils/notificationTranslations");
 
 // Minutes ahead of the event each reminder fires.
 // windowMinutes MUST match the cron interval to avoid gaps or double-sends.
@@ -64,39 +65,37 @@ function formatDateLongIST(date) {
 }
 
 /**
- * Builds the push notification title + body for a given event and reminder type.
+ * Builds the push notification title + body for a given event, reminder type
+ * and recipient language.
  *
- * Body example (24_HOUR, event tomorrow):
+ * Body example (24_HOUR, event tomorrow, en):
  *   Wedding for Patel Family
  *   Tomorrow at 06:30 AM
  *   Venue: Padmavat Society, Paldi
  *   Guests: 150
  */
-function buildNotificationContent(event, reminderType) {
-  const eventDate  = event.eventAt ? new Date(event.eventAt) : null;
-  const eventType  = event.functionType || "Event";
-  const customer   = event.booking.customerName ? ` for ${event.booking.customerName}` : "";
-  const timeStr    = eventDate ? formatTimeIST(eventDate) : "";
+function buildNotificationContent(event, reminderType, lang) {
+  const eventDate = event.eventAt ? new Date(event.eventAt) : null;
+  const eventType = event.functionType || "Event";
+  const forSuffix = buildForSuffix(lang, event.booking.customerName);
+  const timeStr   = eventDate ? formatTimeIST(eventDate) : "";
 
-  let datePhrase = "";
-  if (eventDate) {
-    if (reminderType === "24_HOUR" && isTomorrowIST(eventDate)) {
-      datePhrase = `Tomorrow at ${timeStr}`;
-    } else if (reminderType === "2_HOUR") {
-      datePhrase = `In 2 hours at ${timeStr}`;
-    } else if (reminderType === "30_MINUTE") {
-      datePhrase = `In 30 minutes at ${timeStr}`;
-    } else {
-      datePhrase = `${formatDateLongIST(eventDate)} at ${timeStr}`;
-    }
-  }
+  const datePhrase = eventDate
+    ? buildEventDatePhrase(lang, {
+        reminderType,
+        isTomorrow:  reminderType === "24_HOUR" && isTomorrowIST(eventDate),
+        timeStr,
+        longDateStr: formatDateLongIST(eventDate),
+      })
+    : "";
 
-  const lines = [`${eventType}${customer}`];
-  if (datePhrase)          lines.push(datePhrase);
-  if (event.eventLocation) lines.push(`Venue: ${event.eventLocation}`);
-  if (event.guestCount)    lines.push(`Guests: ${event.guestCount}`);
-
-  return { title: "📅 Event Reminder", body: lines.join("\n") };
+  return getNotificationContent("eventReminder", lang, {
+    eventType,
+    forSuffix,
+    datePhrase,
+    venue:  event.eventLocation,
+    guests: event.guestCount,
+  });
 }
 
 /**
@@ -141,7 +140,7 @@ async function processReminderType(reminderType) {
                     deviceToken:        { not: null },
                     deletedAt:          null,
                   },
-                  select: { id: true, deviceToken: true },
+                  select: { id: true, deviceToken: true, language: true },
                 },
               },
             },
@@ -166,16 +165,14 @@ async function processReminderType(reminderType) {
   let notified = 0, failed = 0, skipped = 0;
 
   for (const event of events) {
-    const users  = event.booking.business.users;
-    const tokens = users.map((u) => u.deviceToken).filter(Boolean);
-    const userIds = users.map((u) => u.id);
+    const users = event.booking.business.users.filter((u) => u.deviceToken);
 
-    if (tokens.length === 0) {
+    if (users.length === 0) {
       skipped++;
       continue;
     }
 
-    const ok = await _processEventReminder(event, reminderType, userIds, tokens);
+    const ok = await _processEventReminder(event, reminderType, users);
     if (ok) notified++;
     else    failed++;
   }
@@ -191,8 +188,7 @@ async function processReminderType(reminderType) {
  *
  * @returns {Promise<boolean>} true if the reminder was successfully sent and recorded
  */
-async function _processEventReminder(event, reminderType, userIds, tokens) {
-  const { title, body } = buildNotificationContent(event, reminderType);
+async function _processEventReminder(event, reminderType, users) {
   const notifData = {
     type:           "event_reminder",
     screen:         "bookingDetails",
@@ -200,33 +196,22 @@ async function _processEventReminder(event, reminderType, userIds, tokens) {
     bookingEventId: event.id,
   };
 
-  // Step 1: persist inbox records before sending push so they exist when the
-  // user taps the notification banner and opens the app.
-  try {
-    await prisma.userNotification.createMany({
-      data: userIds.map((userId) => ({
-        userId,
-        title,
-        body,
-        type: "event_reminder",
-        data: notifData,
-      })),
-    });
-  } catch (err) {
-    console.error(`[Reminder] Inbox createMany failed for event ${event.id}:`, err.message);
-    return false;
-  }
-
-  // Step 2: send push
+  // Groups recipients by language and sends each group its own translated
+  // title/body — both the inbox record (Step 1) and the push (Step 2).
   let pushResult;
   try {
-    pushResult = await sendPushNotifications(tokens, { title, body, data: notifData });
+    pushResult = await sendGroupedNotification(
+      users,
+      (lang) => buildNotificationContent(event, reminderType, lang),
+      notifData,
+      "event_reminder",
+    );
   } catch (err) {
-    console.error(`[Reminder] sendPushNotifications threw for event ${event.id}:`, err.message);
+    console.error(`[Reminder] sendGroupedNotification threw for event ${event.id}:`, err.message);
     return false;
   }
 
-  const delivered = pushResult.successCount > 0 || pushResult.skippedCount === tokens.length;
+  const delivered = pushResult.successCount > 0 || pushResult.skippedCount === users.length;
   if (!delivered) {
     console.warn(
       `[Reminder:${reminderType}] Push delivery failed for event ${event.id} ` +
@@ -290,7 +275,7 @@ async function sendReminderForEvent(bookingEventId, reminderType = "24_HOUR") {
                     deviceToken:        { not: null },
                     deletedAt:          null,
                   },
-                  select: { id: true, deviceToken: true },
+                  select: { id: true, deviceToken: true, language: true },
                 },
               },
             },
@@ -304,16 +289,14 @@ async function sendReminderForEvent(bookingEventId, reminderType = "24_HOUR") {
 
   if (!event) return { ok: false, reason: "BookingEvent not found" };
 
-  const users  = event.booking.business.users;
-  const tokens = users.map((u) => u.deviceToken).filter(Boolean);
-  const userIds = users.map((u) => u.id);
+  const users = event.booking.business.users.filter((u) => u.deviceToken);
 
-  if (tokens.length === 0) {
+  if (users.length === 0) {
     return { ok: false, reason: "No eligible users with a registered device token" };
   }
 
-  const ok = await _processEventReminder(event, reminderType, userIds, tokens);
-  return { ok, pushSent: tokens.length };
+  const ok = await _processEventReminder(event, reminderType, users);
+  return { ok, pushSent: users.length };
 }
 
 module.exports = { processReminderType, sendReminderForEvent, REMINDER_CONFIGS };

@@ -132,6 +132,7 @@ model User {
   profileImageUrl    String?
   pdfPrefix          String?   @default("KAT-2024")
   role               String    @default("owner")
+  language           String    @default("gu")
   isVerified         Boolean   @default(false)
   notificationStatus Int       @default(1)
   userVerifiedAt     DateTime?

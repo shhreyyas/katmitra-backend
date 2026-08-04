@@ -17,14 +17,11 @@
 
 const prisma = require("../config/prisma");
 const { sendPushNotifications } = require("../utils/expoPush");
+const { getNotificationContent } = require("../utils/notificationTranslations");
 
 const REMINDER_TYPE = "business_setup";
 const WINDOW_MINUTES = 15;
 const HOURS_AHEAD = 24;
-
-const NOTIFICATION_TITLE = "Complete your setup 🏪";
-const NOTIFICATION_BODY =
-  "You haven't registered your catering business yet. Set it up now to start managing bookings.";
 
 /**
  * Processes the 24-hour business-setup reminder for the current cron tick.
@@ -50,7 +47,7 @@ async function processBusinessSetupReminder() {
         deviceToken: { not: null },
         onboardingReminders: { none: { reminderType: REMINDER_TYPE } },
       },
-      select: { id: true, deviceToken: true },
+      select: { id: true, deviceToken: true, language: true },
     });
   } catch (err) {
     console.error("[OnboardingReminder] DB query failed:", err.message);
@@ -88,14 +85,15 @@ async function processBusinessSetupReminder() {
  */
 async function _sendBusinessSetupReminder(user) {
   const notifData = { screen: "onboarding" };
+  const { title, body } = getNotificationContent("onboarding", user.language);
 
   // Step 1: persist inbox record before push so it exists when the user taps the banner.
   try {
     await prisma.userNotification.create({
       data: {
         userId: user.id,
-        title:  NOTIFICATION_TITLE,
-        body:   NOTIFICATION_BODY,
+        title,
+        body,
         type:   "business_reminder",
         data:   notifData,
       },
@@ -110,7 +108,7 @@ async function _sendBusinessSetupReminder(user) {
   try {
     pushResult = await sendPushNotifications(
       [user.deviceToken],
-      { title: NOTIFICATION_TITLE, body: NOTIFICATION_BODY, data: notifData },
+      { title, body, data: notifData },
     );
   } catch (err) {
     console.error(`[OnboardingReminder] Push failed for user ${user.id}:`, err.message);

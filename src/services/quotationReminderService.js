@@ -10,7 +10,8 @@
  */
 
 const prisma = require("../config/prisma");
-const { sendPushNotifications } = require("../utils/expoPush");
+const { sendGroupedNotification } = require("../utils/notificationLocalization");
+const { getNotificationContent } = require("../utils/notificationTranslations");
 
 const WINDOW_MINUTES   = 15;
 const DAYS_BEFORE      = 3;
@@ -46,7 +47,7 @@ async function _fetchQuotations(windowStart, windowEnd, reminderType) {
         select: {
           users: {
             where:  USER_FILTER,
-            select: { id: true, deviceToken: true },
+            select: { id: true, deviceToken: true, language: true },
           },
         },
       },
@@ -54,27 +55,23 @@ async function _fetchQuotations(windowStart, windowEnd, reminderType) {
   });
 }
 
-async function _notify(quotation, userIds, tokens, title, body, type, reminderType) {
+async function _notify(quotation, users, messageId, params, type, reminderType) {
   const notifData = { screen: "summaryQuotations", quotationId: quotation.id };
-
-  try {
-    await prisma.userNotification.createMany({
-      data: userIds.map((userId) => ({ userId, title, body, type, data: notifData })),
-    });
-  } catch (err) {
-    console.error(`[QuotationReminder:${reminderType}] Inbox failed for ${quotation.id}:`, err.message);
-    return false;
-  }
 
   let pushResult;
   try {
-    pushResult = await sendPushNotifications(tokens, { title, body, data: notifData });
+    pushResult = await sendGroupedNotification(
+      users,
+      (lang) => getNotificationContent(messageId, lang, params),
+      notifData,
+      type,
+    );
   } catch (err) {
-    console.error(`[QuotationReminder:${reminderType}] Push failed for ${quotation.id}:`, err.message);
+    console.error(`[QuotationReminder:${reminderType}] sendGroupedNotification threw for ${quotation.id}:`, err.message);
     return false;
   }
 
-  const delivered = pushResult.successCount > 0 || pushResult.skippedCount === tokens.length;
+  const delivered = pushResult.successCount > 0 || pushResult.skippedCount === users.length;
   if (!delivered) {
     console.warn(`[QuotationReminder:${reminderType}] Delivery failed for ${quotation.id} — will retry`);
     return false;
@@ -97,7 +94,7 @@ async function _notify(quotation, userIds, tokens, title, body, type, reminderTy
   return true;
 }
 
-async function _runReminder(windowStart, windowEnd, reminderType, title, bodyFn, notifType) {
+async function _runReminder(windowStart, windowEnd, reminderType, messageId, notifType) {
   let quotations;
   try {
     quotations = await _fetchQuotations(windowStart, windowEnd, reminderType);
@@ -113,13 +110,11 @@ async function _runReminder(windowStart, windowEnd, reminderType, title, bodyFn,
   let notified = 0, failed = 0, skipped = 0;
 
   for (const q of quotations) {
-    const users   = q.business.users;
-    const tokens  = users.map((u) => u.deviceToken).filter(Boolean);
-    const userIds = users.map((u) => u.id);
+    const users = q.business.users.filter((u) => u.deviceToken);
 
-    if (tokens.length === 0) { skipped++; continue; }
+    if (users.length === 0) { skipped++; continue; }
 
-    const ok = await _notify(q, userIds, tokens, title, bodyFn(q), notifType, reminderType);
+    const ok = await _notify(q, users, messageId, { clientName: q.clientName }, notifType, reminderType);
     if (ok) notified++;
     else    failed++;
   }
@@ -132,14 +127,7 @@ async function _runReminder(windowStart, windowEnd, reminderType, title, bodyFn,
  */
 async function processQuotationExpiringReminder() {
   const { windowStart, windowEnd } = _buildWindow(DAYS_BEFORE * 24 * 60 * 60_000);
-  return _runReminder(
-    windowStart,
-    windowEnd,
-    "expiring_3d",
-    "Quotation event coming up! 📋",
-    (q) => `Your quotation for ${q.clientName} has an event in 3 days. Make sure everything is confirmed.`,
-    "quotation_expiring",
-  );
+  return _runReminder(windowStart, windowEnd, "expiring_3d", "quotationUpcoming", "quotation_expiring");
 }
 
 /**
@@ -147,14 +135,7 @@ async function processQuotationExpiringReminder() {
  */
 async function processQuotationExpiredReminder() {
   const { windowStart, windowEnd } = _buildWindow(-DAYS_AFTER * 24 * 60 * 60_000);
-  return _runReminder(
-    windowStart,
-    windowEnd,
-    "expired_1d",
-    "Quotation event has passed 📋",
-    (q) => `The event date for your quotation for ${q.clientName} has passed. Please update its status.`,
-    "quotation_expired",
-  );
+  return _runReminder(windowStart, windowEnd, "expired_1d", "quotationPassed", "quotation_expired");
 }
 
 module.exports = { processQuotationExpiringReminder, processQuotationExpiredReminder };

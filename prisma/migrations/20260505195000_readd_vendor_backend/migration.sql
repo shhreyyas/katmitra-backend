@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS "Vendor" (
     "businessId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "address" TEXT,
+    "category" TEXT,
     "isActive" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,

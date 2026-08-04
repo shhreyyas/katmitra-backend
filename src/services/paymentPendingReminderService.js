@@ -16,7 +16,8 @@
  */
 
 const prisma = require("../config/prisma");
-const { sendPushNotifications } = require("../utils/expoPush");
+const { sendGroupedNotification } = require("../utils/notificationLocalization");
+const { getNotificationContent, buildForSuffix } = require("../utils/notificationTranslations");
 
 const REMINDER_TYPE  = "payment_pending";
 const WINDOW_MINUTES = 15;
@@ -52,7 +53,7 @@ async function processPaymentPendingReminder() {
           select: {
             users: {
               where: { notificationStatus: 1, deviceToken: { not: null }, deletedAt: null },
-              select: { id: true, deviceToken: true },
+              select: { id: true, deviceToken: true, language: true },
             },
           },
         },
@@ -75,13 +76,11 @@ async function processPaymentPendingReminder() {
   let notified = 0, failed = 0, skipped = 0;
 
   for (const booking of bookings) {
-    const users   = booking.business.users;
-    const tokens  = users.map((u) => u.deviceToken).filter(Boolean);
-    const userIds = users.map((u) => u.id);
+    const users = booking.business.users.filter((u) => u.deviceToken);
 
-    if (tokens.length === 0) { skipped++; continue; }
+    if (users.length === 0) { skipped++; continue; }
 
-    const ok = await _sendPaymentPendingReminder(booking, userIds, tokens);
+    const ok = await _sendPaymentPendingReminder(booking, users);
     if (ok) notified++;
     else    failed++;
   }
@@ -97,38 +96,25 @@ async function processPaymentPendingReminder() {
  *
  * @returns {Promise<boolean>}
  */
-async function _sendPaymentPendingReminder(booking, userIds, tokens) {
-  const customerPart = booking.customerName ? ` for ${booking.customerName}` : "";
-  const title = "Payment pending! 💳";
-  const body  = `Payment is still remaining for the booking${customerPart}. Please collect it at your earliest convenience.`;
+async function _sendPaymentPendingReminder(booking, users) {
   const notifData = { screen: "bookingPaymentDetails", bookingId: booking.id };
 
-  // Step 1: persist inbox records before push.
-  try {
-    await prisma.userNotification.createMany({
-      data: userIds.map((userId) => ({
-        userId,
-        title,
-        body,
-        type: "payment_pending",
-        data: notifData,
-      })),
-    });
-  } catch (err) {
-    console.error(`[PaymentPending] Inbox createMany failed for booking ${booking.id}:`, err.message);
-    return false;
-  }
-
-  // Step 2: send push.
   let pushResult;
   try {
-    pushResult = await sendPushNotifications(tokens, { title, body, data: notifData });
+    pushResult = await sendGroupedNotification(
+      users,
+      (lang) => getNotificationContent("paymentPending", lang, {
+        forSuffix: buildForSuffix(lang, booking.customerName),
+      }),
+      notifData,
+      "payment_pending",
+    );
   } catch (err) {
-    console.error(`[PaymentPending] Push failed for booking ${booking.id}:`, err.message);
+    console.error(`[PaymentPending] sendGroupedNotification threw for booking ${booking.id}:`, err.message);
     return false;
   }
 
-  const delivered = pushResult.successCount > 0 || pushResult.skippedCount === tokens.length;
+  const delivered = pushResult.successCount > 0 || pushResult.skippedCount === users.length;
   if (!delivered) {
     console.warn(
       `[PaymentPending] Push delivery failed for booking ${booking.id} ` +

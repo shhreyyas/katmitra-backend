@@ -14,6 +14,7 @@ const {
 } = require("../utils/localization");
 const { uploadBase64ToBucket } = require("../utils/uploadBase64Image");
 const { sendPushNotifications } = require("../utils/expoPush");
+const { getNotificationContent } = require("../utils/notificationTranslations");
 
 const TRIAL_DAYS = 30;
 const BUSINESS_LOGO_BUCKET = "business_profile_pictures";
@@ -360,11 +361,11 @@ exports.registerBusiness = async (req, res) => {
     const _wUserId = userId;
     const _wToken  = user.deviceToken;
     const _wNotif  = user.notificationStatus;
+    const _wLang   = user.language;
     Promise.resolve()
       .then(async () => {
-        const title = "Business created! 🎉";
-        const body  = "You're all set. Create your first booking and start managing events.";
-        const data  = { screen: "newBooking" };
+        const { title, body } = getNotificationContent("welcome", _wLang);
+        const data = { screen: "newBooking" };
 
         await prisma.userNotification.create({
           data: { userId: _wUserId, title, body, type: "business_welcome", data },

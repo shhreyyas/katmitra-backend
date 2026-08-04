@@ -15,7 +15,8 @@
  */
 
 const prisma = require("../config/prisma");
-const { sendPushNotifications } = require("../utils/expoPush");
+const { sendGroupedNotification } = require("../utils/notificationLocalization");
+const { getNotificationContent, buildForSuffix } = require("../utils/notificationTranslations");
 
 const REMINDER_TYPE  = "no_menu";
 const WINDOW_MINUTES = 15;
@@ -52,7 +53,7 @@ async function processEventNoMenuReminder() {
               select: {
                 users: {
                   where: { notificationStatus: 1, deviceToken: { not: null }, deletedAt: null },
-                  select: { id: true, deviceToken: true },
+                  select: { id: true, deviceToken: true, language: true },
                 },
               },
             },
@@ -77,13 +78,11 @@ async function processEventNoMenuReminder() {
   let notified = 0, failed = 0, skipped = 0;
 
   for (const event of events) {
-    const users   = event.booking.business.users;
-    const tokens  = users.map((u) => u.deviceToken).filter(Boolean);
-    const userIds = users.map((u) => u.id);
+    const users = event.booking.business.users.filter((u) => u.deviceToken);
 
-    if (tokens.length === 0) { skipped++; continue; }
+    if (users.length === 0) { skipped++; continue; }
 
-    const ok = await _sendEventNoMenuReminder(event, userIds, tokens);
+    const ok = await _sendEventNoMenuReminder(event, users);
     if (ok) notified++;
     else    failed++;
   }
@@ -99,42 +98,29 @@ async function processEventNoMenuReminder() {
  *
  * @returns {Promise<boolean>}
  */
-async function _sendEventNoMenuReminder(event, userIds, tokens) {
-  const customerPart = event.booking.customerName ? ` for ${event.booking.customerName}` : "";
-  const title = "Don't forget the menu! 🍽️";
-  const body  = `You created an event${customerPart} but haven't selected a menu yet. Tap to pick a menu now.`;
+async function _sendEventNoMenuReminder(event, users) {
   const notifData = {
     screen:    "selectMenu",
     bookingId: event.booking.id,
     eventId:   event.id,
   };
 
-  // Step 1: persist inbox records before push.
-  try {
-    await prisma.userNotification.createMany({
-      data: userIds.map((userId) => ({
-        userId,
-        title,
-        body,
-        type: "event_no_menu",
-        data: notifData,
-      })),
-    });
-  } catch (err) {
-    console.error(`[EventNoMenu] Inbox createMany failed for event ${event.id}:`, err.message);
-    return false;
-  }
-
-  // Step 2: send push.
   let pushResult;
   try {
-    pushResult = await sendPushNotifications(tokens, { title, body, data: notifData });
+    pushResult = await sendGroupedNotification(
+      users,
+      (lang) => getNotificationContent("eventNoMenu", lang, {
+        forSuffix: buildForSuffix(lang, event.booking.customerName),
+      }),
+      notifData,
+      "event_no_menu",
+    );
   } catch (err) {
-    console.error(`[EventNoMenu] Push failed for event ${event.id}:`, err.message);
+    console.error(`[EventNoMenu] sendGroupedNotification threw for event ${event.id}:`, err.message);
     return false;
   }
 
-  const delivered = pushResult.successCount > 0 || pushResult.skippedCount === tokens.length;
+  const delivered = pushResult.successCount > 0 || pushResult.skippedCount === users.length;
   if (!delivered) {
     console.warn(
       `[EventNoMenu] Push delivery failed for event ${event.id} ` +

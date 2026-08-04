@@ -8,6 +8,7 @@ const {
   formatUserResponse,
   validatePdfPrefix,
 } = require("../utils/formatUser");
+const { SUPPORTED_LANGUAGE_CODES } = require("../utils/localization");
 
 const validatePassword = (password) => {
   const regex = /^(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/;
@@ -701,7 +702,7 @@ exports.newPassword = async (req, res) => {
 exports.updateUserProfile = async (req, res) => {
   try {
     const userId = req.user.userId;
-    const { name, contact, profile_pic, pdf_prefix } = req.body;
+    const { name, contact, profile_pic, pdf_prefix, language } = req.body;
 
     const data = {};
     if (name !== undefined && String(name).trim()) {
@@ -728,6 +729,18 @@ exports.updateUserProfile = async (req, res) => {
         );
       }
       data.pdfPrefix = trimmed;
+    }
+    if (language !== undefined) {
+      const normalized = String(language).trim().toLowerCase();
+      if (!SUPPORTED_LANGUAGE_CODES.has(normalized)) {
+        return errorResponse(
+          res,
+          "Unsupported language",
+          200,
+          "VALIDATION_ERROR",
+        );
+      }
+      data.language = normalized;
     }
 
     if (Object.keys(data).length === 0) {
