@@ -622,13 +622,14 @@ model Dish {
 }
 
 model DishMenuItem {
-  id         String   @id @default(uuid())
-  dishId     String
-  menuItemId String
-  quantity   Int      @default(1)
-  dish       Dish     @relation(fields: [dishId], references: [id], onDelete: Cascade)
-  menuItem   MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
-  createdAt  DateTime @default(now())
+  id          String   @id @default(uuid())
+  dishId      String
+  menuItemId  String
+  quantity    Int      @default(1)
+  ingredients Json     @default("[]") // per-dish ingredient overrides for this menu item; independent of MenuItem.ingredients
+  dish        Dish     @relation(fields: [dishId], references: [id], onDelete: Cascade)
+  menuItem    MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+  createdAt   DateTime @default(now())
 
   @@unique([dishId, menuItemId])
   @@index([dishId])

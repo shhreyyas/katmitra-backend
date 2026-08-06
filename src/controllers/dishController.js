@@ -98,6 +98,32 @@ function normalizeDishRequiredIngredientsPayload(raw) {
   return out;
 }
 
+/** Same lightweight coercion as normalizeDishRequiredIngredientsPayload, but for one DishMenuItem's own ingredient list (no dish-level supply-catalog validation, matches the existing light-touch style for dish-scoped ingredient data). */
+function normalizeDishMenuItemIngredients(raw) {
+  const arr = parseIngredients(raw);
+  const out = [];
+  for (const ing of arr) {
+    const name = String(ing?.name ?? ing?.ingredient_name ?? "").trim();
+    if (!name) continue;
+    const unit = String(ing?.unit ?? "").trim() || "kg";
+    const qty = num(ing?.qty ?? ing?.quantity);
+    if (qty < 0) continue;
+    const cost = ing?.cost != null ? num(ing.cost) : undefined;
+    const supplyItemId =
+      typeof ing?.supply_item_id === "string" && ing.supply_item_id.trim()
+        ? ing.supply_item_id.trim()
+        : undefined;
+    out.push({
+      name,
+      qty: String(qty),
+      unit,
+      ...(cost !== undefined ? { cost } : {}),
+      ...(supplyItemId ? { supply_item_id: supplyItemId } : {}),
+    });
+  }
+  return out;
+}
+
 async function resolveTotalRequiredIngredients(dish, language) {
   const stored = readDishRequiredIngredientsStorage(dish.requiredIngredients);
   if (dish.requiredIngredientsCustomized === true || stored.customized) {
@@ -119,11 +145,25 @@ async function fetchSupplyItemNameMap(ids, language) {
   );
 }
 
+/**
+ * Per-row source: this dish's own saved override for the item when present,
+ * else the item's global recipe. An override's `qty` is already the final
+ * per-dish absolute amount (set via the per-item ingredient editor), so it
+ * must NOT be multiplied by DishMenuItem.quantity again — only the recipe
+ * fallback (a true per-unit rate) needs that scaling.
+ */
+function ingredientsSourceForRow(row) {
+  const own = parseIngredients(row.ingredients);
+  if (own.length > 0) return { ingredients: own, multiplier: 1 };
+  const multiplier = Math.max(1, parseInt(String(row.quantity ?? 1), 10) || 1);
+  return { ingredients: parseIngredients(row.menuItem?.ingredients), multiplier };
+}
+
 async function buildTotalRequiredIngredients(menuItems, language) {
   const rows = menuItems || [];
   const supplyItemIds = [];
   for (const row of rows) {
-    for (const ing of parseIngredients(row.menuItem?.ingredients)) {
+    for (const ing of ingredientsSourceForRow(row).ingredients) {
       const sid = ing?.supply_item_id ?? ing?.supplyItemId;
       if (typeof sid === "string" && sid.trim()) supplyItemIds.push(sid.trim());
     }
@@ -132,8 +172,7 @@ async function buildTotalRequiredIngredients(menuItems, language) {
 
   const buckets = new Map();
   for (const row of rows) {
-    const multiplier = Math.max(1, parseInt(String(row.quantity ?? 1), 10) || 1);
-    const ingredients = parseIngredients(row.menuItem?.ingredients);
+    const { ingredients, multiplier } = ingredientsSourceForRow(row);
     for (const ing of ingredients) {
       const sid = ing?.supply_item_id ?? ing?.supplyItemId;
       const localizedName =
@@ -236,6 +275,9 @@ async function serializeDish(dish, options = {}) {
       id: row.id,
       menu_item_id: row.menuItemId,
       quantity: row.quantity ?? 1,
+      // This dish's own saved ingredient overrides for this item, if any
+      // (empty = never customized here, client falls back to the recipe).
+      ingredients: parseIngredients(row.ingredients),
       menu_item: row.menuItem
         ? {
             id: row.menuItem.id,
@@ -352,6 +394,7 @@ async function createDish(req, res) {
       .map((row) => ({
         menuItemId: String(row.menu_item_id ?? row.menuItemId ?? "").trim(),
         quantity: Math.max(1, parseInt(String(row.quantity ?? 1), 10) || 1),
+        ingredients: normalizeDishMenuItemIngredients(row.ingredients),
       }))
       .filter((row) => row.menuItemId);
     const ids = [...new Set(normalized.map((row) => row.menuItemId))];
@@ -362,6 +405,25 @@ async function createDish(req, res) {
     if (existingMenus.length !== ids.length) {
       return errorResponse(res, "Invalid menu item in dish", 422, "VALIDATION_ERROR");
     }
+    // `updateDish` already accepted this; create silently dropped it — fixed
+    // here so a brand-new dish's ingredient customization survives the very
+    // first save instead of only sticking from the second edit onward.
+    let requiredIngredientsUpdate;
+    const requiredIngredientsBody =
+      body.required_ingredients !== undefined
+        ? body.required_ingredients
+        : body.requiredIngredients;
+    if (requiredIngredientsBody !== undefined) {
+      if (!Array.isArray(requiredIngredientsBody)) {
+        return errorResponse(
+          res,
+          "required_ingredients must be an array",
+          422,
+          "VALIDATION_ERROR",
+        );
+      }
+      requiredIngredientsUpdate = normalizeDishRequiredIngredientsPayload(requiredIngredientsBody);
+    }
     const dish = await prisma.$transaction(async (tx) => {
       const created = await tx.dish.create({
         data: {
@@ -370,6 +432,13 @@ async function createDish(req, res) {
           pricePerPlate: new Prisma.Decimal(String(num(body.price_per_plate ?? 0))),
           isTemplate: body.is_template !== false,
           parentDishId: body.parent_dish_id ? String(body.parent_dish_id) : null,
+          ...(requiredIngredientsUpdate !== undefined
+            ? {
+                requiredIngredients:
+                  writeDishRequiredIngredientsStorage(requiredIngredientsUpdate),
+                requiredIngredientsCustomized: true,
+              }
+            : {}),
         },
       });
       await tx.dishMenuItem.createMany({
@@ -377,6 +446,7 @@ async function createDish(req, res) {
           dishId: created.id,
           menuItemId: row.menuItemId,
           quantity: row.quantity,
+          ingredients: row.ingredients,
         })),
       });
       return tx.dish.findUnique({
@@ -389,7 +459,11 @@ async function createDish(req, res) {
         },
       });
     });
-    return successResponse(res, "Dish created", await serializeDish(dish, { language: requestedLanguage }));
+    return successResponse(
+      res,
+      "Dish created",
+      await serializeDish(dish, { includeComputed: true, language: requestedLanguage }),
+    );
   } catch (e) {
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
@@ -455,8 +529,12 @@ async function updateDish(req, res) {
           .map((row) => ({
             menuItemId: String(row.menu_item_id ?? row.menuItemId ?? "").trim(),
             quantity: Math.max(1, parseInt(String(row.quantity ?? 1), 10) || 1),
+            ingredients: normalizeDishMenuItemIngredients(row.ingredients),
           }))
           .filter((row) => row.menuItemId);
+        // The whole set is recreated wholesale below, so no diff/upsert is
+        // needed to carry `ingredients` through — it's just part of each
+        // fresh row same as `quantity` already was.
         await tx.dishMenuItem.deleteMany({ where: { dishId: id } });
         if (normalized.length) {
           await tx.dishMenuItem.createMany({
@@ -464,6 +542,7 @@ async function updateDish(req, res) {
               dishId: id,
               menuItemId: row.menuItemId,
               quantity: row.quantity,
+              ingredients: row.ingredients,
             })),
           });
         }
