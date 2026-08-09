@@ -10,6 +10,8 @@ function formatSettings(row) {
     support_email: row.supportEmail,
     payment_upi: row.paymentUpi,
     payment_bank: row.paymentBank,
+    default_service_charge_pct: Number(row.defaultServiceChargePct ?? 10),
+    default_tax_pct: Number(row.defaultTaxPct ?? 5),
     updated_at: row.updatedAt.toISOString(),
   };
 }
@@ -21,6 +23,7 @@ async function ensureSettings() {
   }
   return row;
 }
+exports.ensureSettings = ensureSettings;
 
 /** GET /api/admin/v1/settings */
 exports.getSettings = async (req, res) => {
@@ -61,6 +64,32 @@ exports.updateSettings = async (req, res) => {
 
     if (body.payment_bank !== undefined || body.paymentBank !== undefined) {
       data.paymentBank = String(body.payment_bank ?? body.paymentBank ?? "").trim();
+    }
+
+    if (body.default_service_charge_pct !== undefined) {
+      const sc = Number(body.default_service_charge_pct);
+      if (!Number.isFinite(sc) || sc < 0 || sc > 100) {
+        return errorResponse(
+          res,
+          "Service charge % must be between 0 and 100",
+          422,
+          "VALIDATION_ERROR",
+        );
+      }
+      data.defaultServiceChargePct = sc;
+    }
+
+    if (body.default_tax_pct !== undefined) {
+      const txp = Number(body.default_tax_pct);
+      if (!Number.isFinite(txp) || txp < 0 || txp > 100) {
+        return errorResponse(
+          res,
+          "Tax % must be between 0 and 100",
+          422,
+          "VALIDATION_ERROR",
+        );
+      }
+      data.defaultTaxPct = txp;
     }
 
     if (Object.keys(data).length === 0) {

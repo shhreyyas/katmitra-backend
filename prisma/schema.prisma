@@ -230,6 +230,9 @@ model AppSettings {
   paymentBank  String   @default("") @db.Text
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  defaultServiceChargePct Decimal @default(10) @db.Decimal(5, 2)
+  defaultTaxPct           Decimal @default(5) @db.Decimal(5, 2)
 }
 
 /// Per-platform mobile app version gates (admin-managed; env vars are fallback).

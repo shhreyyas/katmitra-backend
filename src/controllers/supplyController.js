@@ -1250,6 +1250,7 @@ async function computeMenuItemIngredientBreakdown(event, businessId, userId, lan
         name: resolveLocalizedName(src.name, language),
         unit: rowEntry.unit,
         quantity: roundSupplyQty(rowEntry.quantity),
+        category_slug: src.categorySlug,
       });
     }
     return {
@@ -1310,10 +1311,10 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
     const ingredientTotals = new Map();
     const utensilTotals = new Map();
 
-    const addToTotals = (map, key, name, unit, eventId, qty) => {
+    const addToTotals = (map, key, name, unit, eventId, qty, category) => {
       if (!(qty > 0)) return;
       if (!map.has(key)) {
-        map.set(key, { name, unit, perEvent: new Map(), total: 0 });
+        map.set(key, { name, unit, category, perEvent: new Map(), total: 0 });
       }
       const entry = map.get(key);
       entry.perEvent.set(eventId, (entry.perEvent.get(eventId) ?? 0) + qty);
@@ -1336,10 +1337,11 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
         menu_items: menuItemsBreakdown.map(({ menu_item_id, name, ingredients }) => ({
           menu_item_id,
           name,
-          ingredients: ingredients.map(({ name: n, unit, quantity }) => ({
+          ingredients: ingredients.map(({ name: n, unit, quantity, category_slug }) => ({
             name: n,
             unit,
             quantity,
+            category_slug,
           })),
         })),
         utensils: savedUtensilRows.map((row) => ({
@@ -1358,6 +1360,7 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
             row.unit,
             event.id,
             row.quantity,
+            row.categorySlug,
           );
         }
       } else {
@@ -1370,6 +1373,7 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
               ing.unit,
               event.id,
               ing.quantity,
+              ing.category_slug,
             );
           }
         }
@@ -1383,15 +1387,18 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
           row.unit,
           event.id,
           row.quantity,
+          row.categorySlug,
         );
       }
     }
 
     const toRows = (map) =>
-      [...map.values()]
-        .map((e) => ({
+      [...map.entries()]
+        .map(([supplyItemId, e]) => ({
+          supply_item_id: supplyItemId,
           name: e.name,
           unit: e.unit,
+          category_slug: e.category,
           per_event: Object.fromEntries(
             [...e.perEvent.entries()].map(([eid, q]) => [eid, Math.round(q * 100) / 100]),
           ),
@@ -1399,11 +1406,40 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
         }))
         .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
 
+    // Manually-added booking-wide items (from the Booking Supply List screen)
+    // aren't tied to any event — surfaced separately so callers (Documents
+    // hub) can fold them into "whole booking" PDFs without misattributing
+    // them to one arbitrary event.
+    const bookingLevelRows = await prisma.bookingSupplyItem.findMany({
+      where: { bookingId },
+      include: { supplyItem: { select: { type: true } } },
+      orderBy: { createdAt: "asc" },
+    });
+    const bookingLevelIngredients = [];
+    const bookingLevelUtensils = [];
+    for (const row of bookingLevelRows) {
+      const out = {
+        name: resolveLocalizedName(row.nameSnapshot, language),
+        quantity: row.quantity,
+        unit: row.unit,
+        category_slug: row.categorySlug,
+      };
+      if (row.supplyItem?.type === "UTENSIL") {
+        bookingLevelUtensils.push(out);
+      } else {
+        bookingLevelIngredients.push(out);
+      }
+    }
+
     return successResponse(res, "OK", {
       events: eventsOut,
       totals: {
         ingredients: toRows(ingredientTotals),
         utensils: toRows(utensilTotals),
+      },
+      booking_level: {
+        ingredients: bookingLevelIngredients,
+        utensils: bookingLevelUtensils,
       },
     });
   } catch (e) {

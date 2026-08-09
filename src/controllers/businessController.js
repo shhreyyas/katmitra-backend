@@ -15,6 +15,7 @@ const {
 const { uploadBase64ToBucket } = require("../utils/uploadBase64Image");
 const { sendPushNotifications } = require("../utils/expoPush");
 const { getNotificationContent } = require("../utils/notificationTranslations");
+const { ensureSettings } = require("./adminSettingsController");
 
 const TRIAL_DAYS = 30;
 const BUSINESS_LOGO_BUCKET = "business_profile_pictures";
@@ -276,6 +277,11 @@ exports.registerBusiness = async (req, res) => {
     const subscriptionEnd = new Date(now);
     subscriptionEnd.setDate(subscriptionEnd.getDate() + TRIAL_DAYS);
 
+    // Admin-configured platform defaults for a new business's service
+    // charge/tax — a one-time seed onto the Business row; once set, the
+    // owner's own edits (via updateBusiness) are what pricing reads from.
+    const appSettings = await ensureSettings();
+
     const fullBusiness = await prisma.$transaction(async (tx) => {
       const b = await tx.business.create({
         data: {
@@ -297,6 +303,8 @@ exports.registerBusiness = async (req, res) => {
           isTrialUsed: false,
           createdByUserId: userId,
           isProfileCompleted: true,
+          defaultServiceChargePct: appSettings.defaultServiceChargePct,
+          defaultTaxPct: appSettings.defaultTaxPct,
         },
       });
 

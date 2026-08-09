@@ -48,20 +48,20 @@ function normalizeIngredients(raw) {
   return raw;
 }
 
-async function enrichIngredientsWithSupplyUnits(rawIngredients, language) {
-  const ingredients = normalizeIngredients(rawIngredients);
-  const ids = [
-    ...new Set(
-      ingredients
-        .map((r) => {
-          const sid = r?.supply_item_id ?? r?.supplyItemId;
-          return typeof sid === "string" ? sid.trim() : "";
-        })
-        .filter(Boolean),
-    ),
-  ];
-  if (ids.length === 0) return ingredients;
+function collectSupplyItemIds(ingredientLists) {
+  const ids = new Set();
+  for (const raw of ingredientLists) {
+    for (const r of normalizeIngredients(raw)) {
+      const sid = r?.supply_item_id ?? r?.supplyItemId;
+      const id = typeof sid === "string" ? sid.trim() : "";
+      if (id) ids.add(id);
+    }
+  }
+  return [...ids];
+}
 
+async function fetchSupplyItemsById(ids) {
+  if (ids.length === 0) return new Map();
   const rows = await prisma.supplyItem.findMany({
     where: { id: { in: ids } },
     select: {
@@ -71,13 +71,16 @@ async function enrichIngredientsWithSupplyUnits(rawIngredients, language) {
       defaultUnit: true,
     },
   });
-  const byId = new Map(rows.map((r) => [r.id, r]));
+  return new Map(rows.map((r) => [r.id, r]));
+}
 
+function applySupplyUnitsToIngredients(rawIngredients, supplyById, language) {
+  const ingredients = normalizeIngredients(rawIngredients);
   return ingredients.map((row) => {
     const sid = row?.supply_item_id ?? row?.supplyItemId;
     const id = typeof sid === "string" ? sid.trim() : "";
     if (!id) return row;
-    const source = byId.get(id);
+    const source = supplyById.get(id);
     if (!source) return row;
     const unitOptions = Array.isArray(source.unitOptions) ? source.unitOptions : [];
     const localizedName = resolveLocalizedName(source.name, language);
@@ -93,6 +96,15 @@ async function enrichIngredientsWithSupplyUnits(rawIngredients, language) {
       },
     };
   });
+}
+
+/** Single-row convenience wrapper (detail endpoints). List endpoints should
+ * batch via `collectSupplyItemIds` + `fetchSupplyItemsById` across all rows
+ * in the page instead of calling this per row. */
+async function enrichIngredientsWithSupplyUnits(rawIngredients, language) {
+  const ids = collectSupplyItemIds([rawIngredients]);
+  const supplyById = await fetchSupplyItemsById(ids);
+  return applySupplyUnitsToIngredients(rawIngredients, supplyById, language);
 }
 
 /** Same visibility branches as `supplyController.listSupplyItems`. */
@@ -203,14 +215,8 @@ function sumIngredientCosts(ingredients) {
 
 function formatMenuItem(
   row,
-  { includeFinancials = true, language = "en" } = {},
+  { includeFinancials = true, language = "en", minimal = false } = {},
 ) {
-  const ingredients = normalizeIngredients(row.ingredients);
-  const price = Number(row.pricePerPerson);
-  const estimated_cost = sumIngredientCosts(ingredients);
-  const profit = price - estimated_cost;
-  const profit_margin = price === 0 ? 0 : (profit / price) * 100;
-
   const category = {
     name: resolveLocalizedName(row.category?.name, language),
     slug: row.category?.slug ?? row.categorySlug,
@@ -219,25 +225,36 @@ function formatMenuItem(
   const base = {
     _id: row.id,
     name: resolveLocalizedName(row.name, language),
-    description: row.description ?? null,
-    how_to_make: row.howToMake ?? null,
-    price_per_person: price,
+    price_per_person: Number(row.pricePerPerson),
     category,
     food_type: row.foodType,
     business_id: row.businessId,
     created_by: row.createdByUserId,
     is_global: deriveIsGlobal(row.businessId, row.createdByUserId),
     parent_menu_id: row.parentMenuId,
-    ingredients,
-    image_url: row.imageUrl ?? null,
     created_at: row.createdAt.toISOString(),
     updated_at: row.updatedAt.toISOString(),
   };
 
-  if (includeFinancials) {
-    base.estimated_cost = estimated_cost;
-    base.profit = profit;
-    base.profit_margin = profit_margin;
+  // Skipped in `minimal` mode (e.g. a picker list row) — these are the
+  // fields that make the full response heavy: full description/recipe,
+  // per-ingredient detail, and image URL.
+  if (!minimal) {
+    const ingredients = normalizeIngredients(row.ingredients);
+    base.description = row.description ?? null;
+    base.how_to_make = row.howToMake ?? null;
+    base.ingredients = ingredients;
+    base.image_url = row.imageUrl ?? null;
+
+    if (includeFinancials) {
+      const estimated_cost = sumIngredientCosts(ingredients);
+      const profit = base.price_per_person - estimated_cost;
+      const profit_margin =
+        base.price_per_person === 0 ? 0 : (profit / base.price_per_person) * 100;
+      base.estimated_cost = estimated_cost;
+      base.profit = profit;
+      base.profit_margin = profit_margin;
+    }
   }
 
   return base;
@@ -471,7 +488,10 @@ exports.listMenuItems = async (req, res) => {
     const userId = req.user.userId;
     const businessId = req.businessId;
 
-    const { category, categories, food_type, search, q, self_only, exclude_self } = req.query;
+    const { category, categories, food_type, search, q, self_only, exclude_self, minimal } =
+      req.query;
+    const isMinimal =
+      String(minimal ?? "").toLowerCase() === "true" || minimal === "1";
 
     const visibilityOr = [{ isGlobal: true }, { createdByUserId: userId }];
 
@@ -583,15 +603,13 @@ exports.listMenuItems = async (req, res) => {
       const searchOr = [
         { description: { contains: searchTerm, mode: "insensitive" } },
       ];
-      const nameMatchIds = await findIdsMatchingLocalizedNames(searchTerm, orBranches);
+      const [nameMatchIds, ingredientNameIds] = await Promise.all([
+        findIdsMatchingLocalizedNames(searchTerm, orBranches),
+        findIdsMatchingIngredientNames(searchTerm, orBranches),
+      ]);
       if (nameMatchIds.length > 0) {
         searchOr.push({ id: { in: nameMatchIds } });
       }
-
-      const ingredientNameIds = await findIdsMatchingIngredientNames(
-        searchTerm,
-        orBranches,
-      );
       if (ingredientNameIds.length > 0) {
         searchOr.push({ id: { in: ingredientNameIds } });
       }
@@ -604,34 +622,44 @@ exports.listMenuItems = async (req, res) => {
         ? { AND: [{ OR: orBranches }, ...filterAnd] }
         : { OR: orBranches };
 
-    const totalRecord = await prisma.menuItem.count({ where });
+    const [totalRecord, rows] = await Promise.all([
+      prisma.menuItem.count({ where }),
+      prisma.menuItem.findMany({
+        where,
+        orderBy: [{ categorySlug: "asc" }, { updatedAt: "desc" }],
+        skip,
+        take: perPage,
+        include: { category: true },
+      }),
+    ]);
 
     const lastPage =
       totalRecord === 0 ? 0 : Math.ceil(totalRecord / perPage);
     const from = totalRecord === 0 ? 0 : skip + 1;
     const to = totalRecord === 0 ? 0 : Math.min(skip + perPage, totalRecord);
 
-    const rows = await prisma.menuItem.findMany({
-      where,
-      orderBy: [{ categorySlug: "asc" }, { updatedAt: "desc" }],
-      skip,
-      take: perPage,
-      include: { category: true },
-    });
-
-    const data = await Promise.all(
-      rows.map(async (row) => {
-        const item = formatMenuItem(row, {
-          includeFinancials: true,
-          language: requestedLanguage,
-        });
-        item.ingredients = await enrichIngredientsWithSupplyUnits(
-          item.ingredients,
-          requestedLanguage,
-        );
-        return item;
+    const data = rows.map((row) =>
+      formatMenuItem(row, {
+        includeFinancials: true,
+        language: requestedLanguage,
+        minimal: isMinimal,
       }),
     );
+
+    // Batch the ingredient→supply-item unit lookup once across the whole
+    // page instead of one query per row (skipped entirely for `minimal`,
+    // which doesn't return ingredients at all).
+    if (!isMinimal) {
+      const supplyIds = collectSupplyItemIds(rows.map((r) => r.ingredients));
+      const supplyById = await fetchSupplyItemsById(supplyIds);
+      for (const item of data) {
+        item.ingredients = applySupplyUnitsToIngredients(
+          item.ingredients,
+          supplyById,
+          requestedLanguage,
+        );
+      }
+    }
 
     return successResponse(res, "Menu items fetched successfully", data, 200, {
       pagination: {

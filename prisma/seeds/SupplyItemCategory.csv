@@ -9,3 +9,4 @@ name,slug,sortOrder,isActive
 "{""en"":""Fresh Herbs"",""hi"":""ताजी जड़ी-बूटियां"",""gu"":""તાજી ભાજી""}",fresh-herbs,8,true
 "{""en"":""Cooking Equipment"",""hi"":""रसोई उपकरण"",""gu"":""રસોઈ સામગ્રી""}",cooking-equipment,9,true
 "{""en"":""Serving Equipment"",""hi"":""परोसने के बर्तन"",""gu"":""પીરસવાના વાસણ""}",serving-equipment,10,true
+"{""en"":""Beverages"",""hi"":""पेय पदार्थ"",""gu"":""પીણાં""}",beverages,11,true

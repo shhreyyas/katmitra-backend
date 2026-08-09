@@ -495,6 +495,18 @@ function serializeBookingListRow(b) {
   const events = b.events || [];
   const nextEvent = events[0];
   const nextEventAt = nextEvent?.eventAt ?? b.eventAt ?? null;
+  // `events` is already pre-sorted eventAt asc, so the last row is the latest
+  // event — used as a fallback span (first event to last event) only when the
+  // booking has no explicit eventRangeStart/End (legacy bookings created
+  // before the date-range picker existed).
+  const lastEvent = events[events.length - 1];
+  const lastEventAt = lastEvent?.eventAt ?? nextEventAt;
+  // eventRangeStart/eventRangeEnd is the booking-level span the owner picked
+  // up front when creating the booking (selectEvent.tsx) — the authoritative
+  // "start to end" for a multi-day function, independent of how many
+  // per-day BookingEvent rows were actually added under it.
+  const rangeStart = b.eventRangeStart ?? nextEventAt;
+  const rangeEnd = b.eventRangeEnd ?? lastEventAt;
   /** Deduped, chronological (events are pre-sorted by eventAt asc). */
   const jamanvarTypes = [
     ...new Set(events.map((ev) => ev.jamanvarType).filter(Boolean)),
@@ -507,6 +519,8 @@ function serializeBookingListRow(b) {
     status: b.status,
     payment_status: paymentStatusFromAmounts(num(b.amountPaid), num(b.totalDue)),
     event_at: nextEventAt?.toISOString?.() ?? nextEventAt,
+    event_start_at: rangeStart?.toISOString?.() ?? rangeStart,
+    event_end_at: rangeEnd?.toISOString?.() ?? rangeEnd,
     jamanvar_types: jamanvarTypes,
     event_count: b._count?.events ?? events.length,
     guest_count: b.guestCount,
@@ -1340,7 +1354,14 @@ async function createEvent(req, res) {
     if (existing.status === "CANCELLED") {
       return errorResponse(res, "Cancelled booking cannot be updated", 200, "VALIDATION_ERROR");
     }
-    if (existing.status !== "DRAFT") {
+    if (existing.completedAt) {
+      return errorResponse(res, "Completed booking cannot be updated", 200, "VALIDATION_ERROR");
+    }
+    // DRAFT: full booking-setup flow. CONFIRMED: adding an extra event to an
+    // already-confirmed booking (e.g. from the booking summary screen) — the
+    // bulk `events` array on updateBooking deliberately rejects this, so new
+    // events for a confirmed booking are created one at a time, here.
+    if (existing.status !== "DRAFT" && existing.status !== "CONFIRMED") {
       return errorResponse(
         res,
         "Confirmed booking is locked for event/menu updates.",
@@ -1781,6 +1802,8 @@ async function listBookings(req, res) {
                 status: true,
                 paymentStatus: true,
                 eventAt: true,
+                eventRangeStart: true,
+                eventRangeEnd: true,
                 guestCount: true,
                 totalDue: true,
                 amountPaid: true,
@@ -2047,6 +2070,15 @@ async function confirmBooking(req, res) {
         num(existing.serviceChargePct),
         num(existing.taxPct),
       );
+
+      // Confirming the booking confirms every one of its events too — there's
+      // no separate per-event confirmation step, so this is the one place
+      // BookingEvent.status moves off PENDING. Never downgrades an event
+      // that's already COMPLETED (post-event flows set that separately).
+      await tx.bookingEvent.updateMany({
+        where: { bookingId, status: { not: "COMPLETED" } },
+        data: { status: "CONFIRMED" },
+      });
 
       const updated = await tx.booking.update({
         where: { id: bookingId },
