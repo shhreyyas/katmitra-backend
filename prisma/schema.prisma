@@ -659,6 +659,8 @@ model Quotation {
 
   clientName          String
   clientPhone         String?
+  clientEmail         String?
+  clientAddress       String?
   functionType        String?
   eventDate           DateTime?
   guestCount          Int       @default(0)

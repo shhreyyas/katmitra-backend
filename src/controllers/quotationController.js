@@ -5,7 +5,9 @@ const { getRequestedLanguage, resolveLocalizedName } = require("../utils/localiz
 const {
   computeQuotationTotalFromEvents,
   deriveQuotationEventFoodSubtotal,
+  deriveQuotationEventExtrasSubtotal,
 } = require("./quotationPricingHelpers");
+const { roundInr } = require("./bookingPricingHelpers");
 const { resolveExtraServiceLineRows } = require("./extraServiceController");
 
 function serializeQuotationExtraServiceLine(row) {
@@ -139,6 +141,9 @@ function legacyMenuFieldsFromBody(body) {
 }
 
 function serializeQuotationEvent(ev) {
+  const eventFoodAmount = deriveQuotationEventFoodSubtotal(ev);
+  const eventExtrasAmount = deriveQuotationEventExtrasSubtotal(ev);
+  const computedEventTotal = roundInr(eventFoodAmount + eventExtrasAmount);
   return {
     id: ev.id,
     quotation_id: ev.quotationId,
@@ -152,8 +157,12 @@ function serializeQuotationEvent(ev) {
     dish_id: ev.dishId ?? null,
     parent_dish_id: ev.parentDishId ?? null,
     is_template: ev.isTemplate ?? null,
-    event_total: ev.eventTotal != null ? num(ev.eventTotal) : null,
-    event_subtotal: deriveQuotationEventFoodSubtotal(ev),
+    /** Food-only amount (guests × pricePerPlate from snapshot). */
+    event_subtotal: eventFoodAmount,
+    /** Extra services total for this event. */
+    event_extras_amount: eventExtrasAmount,
+    /** Full event total = food + extras. */
+    event_total: computedEventTotal,
     event_snapshot: ev.eventSnapshot ?? null,
     extra_service_lines: (ev.extraServiceLines || []).map(serializeQuotationExtraServiceLine),
     created_at: ev.createdAt?.toISOString?.() ?? ev.createdAt,
@@ -167,6 +176,10 @@ function serializeQuotation(q) {
 
   const extraServiceLines = (q.extraServiceLines || []).map(serializeQuotationExtraServiceLine);
   const extraCharges = extraServiceLines.reduce((s, l) => s + num(l.line_total), 0);
+  const foodSubtotal = (q.events || []).reduce(
+    (s, ev) => s + deriveQuotationEventFoodSubtotal(ev),
+    0,
+  );
 
   return {
     id: q.id,
@@ -174,6 +187,8 @@ function serializeQuotation(q) {
     status: q.status ?? "SALE",
     client_name: q.clientName,
     client_phone: q.clientPhone ?? null,
+    client_email: q.clientEmail ?? null,
+    client_address: q.clientAddress ?? null,
     function_type: q.functionType ?? null,
     // Legacy mirror of events[0] — kept in sync so older callers / the Schedule tab's
     // date filter (which queries this column directly) keep working unmodified.
@@ -183,6 +198,7 @@ function serializeQuotation(q) {
     service_charge_pct: num(q.serviceChargePct),
     tax_pct: num(q.taxPct),
     subtotal: num(q.subtotal),
+    food_subtotal: roundInr(foodSubtotal),
     service_charge_amount: num(q.serviceChargeAmount),
     tax_amount: num(q.taxAmount),
     total: num(q.total),
@@ -325,6 +341,14 @@ async function createQuotation(req, res) {
           clientPhone:
             body.client_phone != null && String(body.client_phone).trim() !== ""
               ? String(body.client_phone).trim()
+              : null,
+          clientEmail:
+            body.client_email != null && String(body.client_email).trim() !== ""
+              ? String(body.client_email).trim()
+              : null,
+          clientAddress:
+            body.client_address != null && String(body.client_address).trim() !== ""
+              ? String(body.client_address).trim()
               : null,
           functionType:
             (firstEvent?.function_type ?? body.function_type) != null &&
@@ -557,6 +581,18 @@ async function updateQuotation(req, res) {
                 ? String(body.client_phone).trim()
                 : null
               : existing.clientPhone,
+          clientEmail:
+            body.client_email !== undefined
+              ? body.client_email != null && String(body.client_email).trim() !== ""
+                ? String(body.client_email).trim()
+                : null
+              : existing.clientEmail,
+          clientAddress:
+            body.client_address !== undefined
+              ? body.client_address != null && String(body.client_address).trim() !== ""
+                ? String(body.client_address).trim()
+                : null
+              : existing.clientAddress,
           functionType:
             (firstEvent?.function_type ?? body.function_type) !== undefined
               ? (firstEvent?.function_type ?? body.function_type) != null &&
