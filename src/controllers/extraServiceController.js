@@ -72,13 +72,12 @@ function resolveTargetEventId(booking, body) {
 }
 
 /**
- * Resolve a raw `lines: [{extra_service_id, quantity?, unit_price?}]` array into
- * Prisma-ready row data (unit price / line total snapshots), shared by Booking's
- * `setBookingExtraServices` and Quotation's event-service handling so the catalog
- * lookup + FIXED/PER_UNIT/PER_GUEST math isn't duplicated across controllers.
- * @returns {Promise<{ rows?: object[], extrasTotal?: number, error?: string }>}
+ * The DB half of `resolveExtraServiceLineRows`, split out so callers building several
+ * batches of lines (e.g. one per quotation event) can fetch the whole catalog they'll
+ * need ONCE, before opening a transaction — see `buildExtraServiceLineRows` below.
+ * @returns {Promise<{ servicesById?: Map<string, object>, error?: string }>}
  */
-async function resolveExtraServiceLineRows({ businessId, userId, lines, guestCount }) {
+async function fetchExtraServicesForLines({ businessId, userId, lines }) {
   const serviceIds = [
     ...new Set(
       (lines || [])
@@ -101,7 +100,17 @@ async function resolveExtraServiceLineRows({ businessId, userId, lines, guestCou
     }
     for (const svc of services) servicesById.set(svc.id, svc);
   }
+  return { servicesById };
+}
 
+/**
+ * Pure computation (no I/O) — turns raw `lines` into Prisma-ready row data using an
+ * already-fetched `servicesById` map. Safe to call inside an open transaction, unlike
+ * `fetchExtraServicesForLines`, which talks to the DB on its own connection and can
+ * eat into an interactive transaction's timeout budget if called from inside one.
+ * @returns {{ rows?: object[], extrasTotal?: number, error?: string }}
+ */
+function buildExtraServiceLineRows({ lines, guestCount, servicesById }) {
   const rows = [];
   let extrasTotal = 0;
   for (const line of lines || []) {
@@ -135,6 +144,24 @@ async function resolveExtraServiceLineRows({ businessId, userId, lines, guestCou
   }
 
   return { rows, extrasTotal };
+}
+
+/**
+ * Resolve a raw `lines: [{extra_service_id, quantity?, unit_price?}]` array into
+ * Prisma-ready row data (unit price / line total snapshots), shared by Booking's
+ * `setBookingExtraServices` and Quotation's event-service handling so the catalog
+ * lookup + FIXED/PER_UNIT/PER_GUEST math isn't duplicated across controllers.
+ *
+ * Fetches + computes in one call — fine for a single batch outside a transaction.
+ * For several batches (e.g. one per quotation event) sharing a transaction, call
+ * `fetchExtraServicesForLines` once up front instead and reuse its `servicesById`
+ * with `buildExtraServiceLineRows` per batch.
+ * @returns {Promise<{ rows?: object[], extrasTotal?: number, error?: string }>}
+ */
+async function resolveExtraServiceLineRows({ businessId, userId, lines, guestCount }) {
+  const { error, servicesById } = await fetchExtraServicesForLines({ businessId, userId, lines });
+  if (error) return { error };
+  return buildExtraServiceLineRows({ lines, guestCount, servicesById });
 }
 
 async function recalcBookingTotalDue(bookingId) {
@@ -441,6 +468,8 @@ module.exports = {
   recalcBookingTotalDue,
   serializeExtraServiceLine,
   resolveExtraServiceLineRows,
+  fetchExtraServicesForLines,
+  buildExtraServiceLineRows,
   extraServiceVisibilityOrBranches,
   computeLineTotal,
 };

@@ -8,7 +8,19 @@ const {
   deriveQuotationEventExtrasSubtotal,
 } = require("./quotationPricingHelpers");
 const { roundInr } = require("./bookingPricingHelpers");
-const { resolveExtraServiceLineRows } = require("./extraServiceController");
+const {
+  fetchExtraServicesForLines,
+  buildExtraServiceLineRows,
+} = require("./extraServiceController");
+
+/** Flattens every event's `extra_service_lines` into one array for a single up-front catalog fetch. */
+function allExtraServiceLinesFromEvents(events) {
+  const all = [];
+  for (const ev of events || []) {
+    if (Array.isArray(ev.extra_service_lines)) all.push(...ev.extra_service_lines);
+  }
+  return all;
+}
 
 function serializeQuotationExtraServiceLine(row) {
   return {
@@ -232,8 +244,13 @@ const quotationInclude = {
  * Creates QuotationEvent + (per-event) QuotationExtraServiceLine rows for `events[]`
  * inside an open transaction. Events are created one at a time (not `createMany`)
  * because each event's service lines need its freshly-assigned id.
+ *
+ * `servicesById` must already be fetched (see `fetchExtraServicesForLines`) — this
+ * function does no I/O beyond the `tx` writes themselves. Fetching the extra service
+ * catalog per event via a separate connection while this transaction is open eats
+ * into Prisma's 5s interactive-transaction timeout, and compounds with event count.
  */
-async function createQuotationEventsInTx(tx, { businessId, userId, quotationId, events }) {
+async function createQuotationEventsInTx(tx, { quotationId, events, servicesById }) {
   for (const ev of events) {
     const created = await tx.quotationEvent.create({
       data: {
@@ -260,12 +277,7 @@ async function createQuotationEventsInTx(tx, { businessId, userId, quotationId, 
     if (lines.length === 0) continue;
 
     const guestCount = Math.max(0, Number(created.guestCount) || 0);
-    const resolved = await resolveExtraServiceLineRows({
-      businessId,
-      userId,
-      lines,
-      guestCount,
-    });
+    const resolved = buildExtraServiceLineRows({ lines, guestCount, servicesById });
     if (resolved.error) return { error: resolved.error };
     if (resolved.rows.length > 0) {
       await tx.quotationExtraServiceLine.createMany({
@@ -331,6 +343,18 @@ async function createQuotation(req, res) {
     const platePriceVal = parsePlatePrice(body);
     const platePriceDecimal = platePriceVal == null ? null : new Prisma.Decimal(String(platePriceVal));
 
+    // Fetch the extra-service catalog once, before opening the transaction — see
+    // `createQuotationEventsInTx`'s doc comment for why this can't happen inside it.
+    const extraServicesFetch = await fetchExtraServicesForLines({
+      businessId,
+      userId,
+      lines: allExtraServiceLinesFromEvents(events),
+    });
+    if (extraServicesFetch.error) {
+      return errorResponse(res, extraServicesFetch.error, 422, "VALIDATION_ERROR");
+    }
+    const servicesById = extraServicesFetch.servicesById;
+
     const result = await prisma.$transaction(async (tx) => {
       const created = await tx.quotation.create({
         data: {
@@ -382,10 +406,9 @@ async function createQuotation(req, res) {
 
       if (events.length > 0) {
         const evResult = await createQuotationEventsInTx(tx, {
-          businessId,
-          userId,
           quotationId: created.id,
           events,
+          servicesById,
         });
         if (evResult.error) throw new Error(`__VALIDATION__${evResult.error}`);
       }
@@ -536,6 +559,21 @@ async function updateQuotation(req, res) {
 
     const platePricePatch = parsePlatePrice(body);
 
+    // Fetch the extra-service catalog once, before opening the transaction — see
+    // `createQuotationEventsInTx`'s doc comment for why this can't happen inside it.
+    let servicesById = new Map();
+    if (eventsProvided && events.length > 0) {
+      const extraServicesFetch = await fetchExtraServicesForLines({
+        businessId,
+        userId,
+        lines: allExtraServiceLinesFromEvents(events),
+      });
+      if (extraServicesFetch.error) {
+        return errorResponse(res, extraServicesFetch.error, 422, "VALIDATION_ERROR");
+      }
+      servicesById = extraServicesFetch.servicesById;
+    }
+
     const result = await prisma.$transaction(async (tx) => {
       if (snapBuiltForTx) {
         await tx.quotationMenuItem.deleteMany({ where: { quotationId: id } });
@@ -553,10 +591,9 @@ async function updateQuotation(req, res) {
         await tx.quotationEvent.deleteMany({ where: { quotationId: id } });
         if (events.length > 0) {
           const evResult = await createQuotationEventsInTx(tx, {
-            businessId,
-            userId,
             quotationId: id,
             events,
+            servicesById,
           });
           if (evResult.error) throw new Error(`__VALIDATION__${evResult.error}`);
         }
@@ -651,12 +688,15 @@ async function deleteQuotation(req, res) {
     const businessId = req.businessId;
     const id = req.params.id;
 
-    const existing = await prisma.quotation.findFirst({ where: { id, businessId } });
-    if (!existing) {
+    // Single round trip: deleteMany scoped by (id, businessId) does the ownership
+    // check and the delete together — findFirst-then-delete was two sequential
+    // queries for the same result.
+    const { count } = await prisma.quotation.deleteMany({
+      where: { id, businessId },
+    });
+    if (count === 0) {
       return errorResponse(res, "Quotation not found", 404, "NOT_FOUND");
     }
-
-    await prisma.quotation.delete({ where: { id } });
     return successResponse(res, "Quotation deleted", { id });
   } catch (e) {
     console.error("deleteQuotation:", e);
