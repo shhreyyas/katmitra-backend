@@ -744,15 +744,27 @@ async function convertQuotationToBooking(req, res) {
       const bookingCode = await generateUniqueBookingCode(tx, businessId);
       const firstEvent = existing.events[0] ?? null;
 
+      // Derive event date range for multi-event bookings
+      const eventDates = existing.events
+        .map((ev) => ev.eventAt)
+        .filter((d) => d != null)
+        .map((d) => new Date(d).getTime())
+        .filter((ms) => !Number.isNaN(ms));
+      const eventRangeStart = eventDates.length > 0 ? new Date(Math.min(...eventDates)) : null;
+      const eventRangeEnd = eventDates.length > 0 ? new Date(Math.max(...eventDates)) : null;
+
       const booking = await tx.booking.create({
         data: {
           businessId,
-          status: "DRAFT",
+          status: "CONFIRMED",
           bookingCode,
           customerName: existing.clientName,
           customerPhone: existing.clientPhone,
+          customerEmail: existing.clientEmail ?? null,
           eventAt: firstEvent?.eventAt ?? existing.eventDate,
-          eventLocation: firstEvent?.eventLocation ?? null,
+          eventRangeStart,
+          eventRangeEnd,
+          eventLocation: firstEvent?.eventLocation ?? existing.clientAddress ?? null,
           functionType: firstEvent?.functionType ?? existing.functionType,
           guestCount: firstEvent?.guestCount ?? existing.guestCount,
           discountAmount: existing.discountAmount,
@@ -761,17 +773,32 @@ async function convertQuotationToBooking(req, res) {
         },
       });
 
+      // Transfer flat menu items (legacy single-event mirror) to BookingMenuItem
+      if (existing.menuItems.length > 0) {
+        await tx.bookingMenuItem.createMany({
+          data: existing.menuItems.map((mi) => ({
+            bookingId: booking.id,
+            menuItemId: mi.menuItemId,
+            quantity: 1,
+            pricePerPlateSnapshot: mi.pricePerPlateSnapshot,
+            nameSnapshot: mi.nameSnapshot,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
       const eventIdMap = new Map();
       for (const ev of existing.events) {
         const created = await tx.bookingEvent.create({
           data: {
             bookingId: booking.id,
             eventAt: ev.eventAt,
-            eventLocation: ev.eventLocation,
+            eventLocation: ev.eventLocation ?? existing.clientAddress ?? null,
+            functionType: ev.functionType ?? null,
             jamanvarType: ev.jamanvarType,
             guestCount: ev.guestCount,
             notes: ev.notes,
-            status: "PENDING",
+            status: "CONFIRMED",
             dishId: ev.dishId,
             parentDishId: ev.parentDishId,
             isTemplate: ev.isTemplate,

@@ -292,7 +292,7 @@ function serializeBookingEvent(ev) {
     event_at: ev.eventAt?.toISOString?.() ?? ev.eventAt ?? null,
     event_location: ev.eventLocation ?? null,
     jamanvar_type: resolveEventJamanvarType(ev),
-    function_type: null,
+    function_type: ev.functionType ?? null,
     guest_count: ev.guestCount ?? null,
     notes: ev.notes ?? null,
     status: ev.status ?? "PENDING",
