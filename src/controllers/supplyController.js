@@ -1608,6 +1608,24 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       language,
     );
 
+    // How many distinct dishes in this event use each ingredient — a saved
+    // per-event override can only be attributed back to a single dish's card
+    // when it's used in exactly one dish; when shared across dishes the
+    // saved total can't be unambiguously split, so those cards keep showing
+    // the recipe-template quantity.
+    const supplyItemMenuItemCount = new Map();
+    for (const item of byMenuItem.values()) {
+      const seenInThisItem = new Set();
+      for (const rowEntry of item.rows.values()) {
+        if (seenInThisItem.has(rowEntry.supply_item_id)) continue;
+        seenInThisItem.add(rowEntry.supply_item_id);
+        supplyItemMenuItemCount.set(
+          rowEntry.supply_item_id,
+          (supplyItemMenuItemCount.get(rowEntry.supply_item_id) ?? 0) + 1,
+        );
+      }
+    }
+
     const supplyIdsFromMenu = [
       ...new Set(
         [
@@ -1714,12 +1732,15 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       for (const rowEntry of item.rows.values()) {
         const src = supplyById.get(rowEntry.supply_item_id);
         if (!src) continue;
+        const saved = savedBySupplyId.get(rowEntry.supply_item_id);
+        const useSaved =
+          saved && supplyItemMenuItemCount.get(rowEntry.supply_item_id) === 1;
         ingredientsOut.push({
           supply_item_id: rowEntry.supply_item_id,
           name: resolveLocalizedName(src.name, language),
-          unit: rowEntry.unit,
+          unit: useSaved ? saved.unit : rowEntry.unit,
           qty_per_plate: rowEntry.qty_per_plate,
-          quantity: roundSupplyQty(rowEntry.quantity),
+          quantity: roundSupplyQty(useSaved ? saved.quantity : rowEntry.quantity),
           category_slug: src.categorySlug,
           cost: rowEntry.cost ?? null,
         });
