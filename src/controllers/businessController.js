@@ -417,6 +417,7 @@ exports.updateBusiness = async (req, res) => {
     }
 
     const {
+      business_name,
       business_logo,
       gst_number,
       business_address,
@@ -428,6 +429,18 @@ exports.updateBusiness = async (req, res) => {
     } = req.body;
 
     const data = {};
+    if (business_name !== undefined) {
+      const trimmed = String(business_name).trim();
+      if (!trimmed) {
+        return errorResponse(
+          res,
+          "Business name cannot be empty",
+          200,
+          "VALIDATION_ERROR",
+        );
+      }
+      data.name = trimmed;
+    }
     if (business_logo !== undefined) {
       const v = String(business_logo).trim();
       data.logoUrl = v || null;

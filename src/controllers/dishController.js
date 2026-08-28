@@ -201,6 +201,18 @@ async function buildTotalRequiredIngredients(menuItems, language) {
   );
 }
 
+/** Case-insensitive same-business name collision check, excluding a given dish id on update. */
+async function findDuplicateDishByName(businessId, name, excludeId) {
+  return prisma.dish.findFirst({
+    where: {
+      businessId,
+      name: { equals: name, mode: "insensitive" },
+      ...(excludeId ? { id: { not: excludeId } } : {}),
+    },
+    select: { id: true },
+  });
+}
+
 /** Fields loaded for list / picker endpoints (avoids large MenuItem.ingredients blobs). */
 const DISH_LIST_MENU_ITEM_SELECT = {
   id: true,
@@ -386,6 +398,15 @@ async function createDish(req, res) {
     const body = req.body || {};
     const name = String(body.name ?? "").trim();
     if (!name) return errorResponse(res, "Dish name required", 422, "VALIDATION_ERROR");
+    const duplicate = await findDuplicateDishByName(businessId, name);
+    if (duplicate) {
+      return errorResponse(
+        res,
+        "A dish with this name already exists",
+        409,
+        "DUPLICATE_DISH_NAME",
+      );
+    }
     const menuItems = Array.isArray(body.menu_items) ? body.menu_items : [];
     if (menuItems.length === 0) {
       return errorResponse(res, "Select at least one menu item", 422, "VALIDATION_ERROR");
@@ -480,6 +501,15 @@ async function updateDish(req, res) {
     const name =
       body.name !== undefined ? String(body.name ?? "").trim() : existing.name;
     if (!name) return errorResponse(res, "Dish name required", 422, "VALIDATION_ERROR");
+    const duplicate = await findDuplicateDishByName(businessId, name, id);
+    if (duplicate) {
+      return errorResponse(
+        res,
+        "A dish with this name already exists",
+        409,
+        "DUPLICATE_DISH_NAME",
+      );
+    }
     const menuItems = Array.isArray(body.menu_items) ? body.menu_items : null;
     let requiredIngredientsUpdate;
     const requiredIngredientsBody =
@@ -580,11 +610,33 @@ async function deleteDish(req, res) {
   }
 }
 
+async function bulkDeleteDishes(req, res) {
+  try {
+    const businessId = req.businessId;
+    const body = req.body || {};
+    const ids = Array.isArray(body.ids)
+      ? [...new Set(body.ids.map((v) => String(v ?? "").trim()).filter(Boolean))]
+      : [];
+    if (ids.length === 0) {
+      return errorResponse(res, "No dish ids provided", 422, "VALIDATION_ERROR");
+    }
+    // `Dish` -> `DishMenuItem` cascades at the DB level (onDelete: Cascade),
+    // same as the singular deleteDish above, so no explicit child cleanup here.
+    const { count } = await prisma.dish.deleteMany({
+      where: { id: { in: ids }, businessId },
+    });
+    return successResponse(res, "Dishes deleted", { deleted: count, ids });
+  } catch (e) {
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
 module.exports = {
   listDishes,
   getDish,
   createDish,
   updateDish,
   deleteDish,
+  bulkDeleteDishes,
 };
 

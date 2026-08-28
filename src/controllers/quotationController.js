@@ -6,6 +6,7 @@ const {
   computeQuotationTotalFromEvents,
   deriveQuotationEventFoodSubtotal,
   deriveQuotationEventExtrasSubtotal,
+  isQuotationExpired,
 } = require("./quotationPricingHelpers");
 const { roundInr } = require("./bookingPricingHelpers");
 const {
@@ -455,7 +456,9 @@ async function listQuotations(req, res) {
     const [rows, total] = await Promise.all([
       prisma.quotation.findMany({
         where: { businessId },
-        orderBy: { updatedAt: "desc" },
+        // Farthest-out event date first, nearest date last (nulls/no-date quotations last);
+        // most-recently-updated breaks ties, e.g. quotations sharing the same event date.
+        orderBy: [{ eventDate: { sort: "desc", nulls: "last" } }, { updatedAt: "desc" }],
         take,
         skip,
         include: quotationInclude,
@@ -738,6 +741,15 @@ async function convertQuotationToBooking(req, res) {
       if (already) {
         return successResponse(res, "Already converted", serializeBooking(already));
       }
+    }
+
+    if (isQuotationExpired(existing)) {
+      return errorResponse(
+        res,
+        "This quotation has expired and can no longer be confirmed. Update the event date and try again.",
+        400,
+        "QUOTATION_EXPIRED",
+      );
     }
 
     const newBookingId = await prisma.$transaction(async (tx) => {

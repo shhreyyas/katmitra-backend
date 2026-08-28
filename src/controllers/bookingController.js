@@ -87,10 +87,15 @@ function paymentStatusFromAmounts(amountPaid, totalDue) {
   return "PARTIAL";
 }
 
-const EVENT_EDIT_CUTOFF_MS = 48 * 60 * 60 * 1000;
+const EVENT_EDIT_CUTOFF_MS = 12 * 60 * 60 * 1000;
 
-/** Event/menu/customer-detail edits allowed only more than 48h before event start. */
-function canEditBeforeEventCutoff(eventAt) {
+/**
+ * Event/menu/customer-detail edits allowed only more than 12h before event start —
+ * but only once the booking is CONFIRMED. A DRAFT booking isn't a real commitment yet,
+ * so it stays editable at any time, even after its event date has passed.
+ */
+function canEditBeforeEventCutoff(eventAt, status) {
+  if (status === "DRAFT") return true;
   if (!eventAt) return true;
   const start = new Date(eventAt).getTime();
   if (Number.isNaN(start)) return true;
@@ -98,12 +103,12 @@ function canEditBeforeEventCutoff(eventAt) {
   return start - Date.now() > EVENT_EDIT_CUTOFF_MS;
 }
 
-function canEditMenuBeforeEvent(eventAt) {
-  return canEditBeforeEventCutoff(eventAt);
+function canEditMenuBeforeEvent(eventAt, status) {
+  return canEditBeforeEventCutoff(eventAt, status);
 }
 
-function canEditCustomerDetailsBeforeEvent(eventAt) {
-  return canEditBeforeEventCutoff(eventAt);
+function canEditCustomerDetailsBeforeEvent(eventAt, status) {
+  return canEditBeforeEventCutoff(eventAt, status);
 }
 
 function primaryEventAtFromRow(b) {
@@ -162,6 +167,10 @@ const CONFIRMED_LIMITED_PATCH_TOP = new Set([
   "guest_count",
   "notes",
   "events",
+  // Display-only booking window; `baseData` applies these regardless, so they
+  // must not flip an otherwise-allowed confirmed edit into the "locked" branch.
+  "event_range_start",
+  "event_range_end",
   "updated_at",
   "update_reason",
   "step_number",
@@ -476,9 +485,10 @@ function serializeBooking(b, { includePayments = true } = {}) {
     extra_service_lines: extraServiceLines,
     extra_charges: extraCharges,
     ...(payments !== undefined ? { payments } : {}),
-    can_edit_menu: canEditMenuBeforeEvent(firstEvent?.event_at ?? bookingAtIso),
+    can_edit_menu: canEditMenuBeforeEvent(firstEvent?.event_at ?? bookingAtIso, b.status),
     can_edit_customer_details: canEditCustomerDetailsBeforeEvent(
       firstEvent?.event_at ?? bookingAtIso,
+      b.status,
     ),
     created_at: b.createdAt?.toISOString?.() ?? b.createdAt,
     updated_at: b.updatedAt?.toISOString?.() ?? b.updatedAt,
@@ -738,7 +748,7 @@ async function patchBooking(req, res) {
     const confirmedLimitedPatch = !isDraft && isConfirmedLimitedPatch(body);
     const eventAtForCutoff = primaryEventAtFromRow(existing);
 
-    // Post-confirm: customer + event details (>48h before event); menu still locked.
+    // Post-confirm: customer + event details (>12h before event); menu still locked.
     if (!isDraft) {
       const touchesMenu = menuItemIds != null || menuLines != null;
       const touchesEvents = Array.isArray(body.events);
@@ -750,10 +760,10 @@ async function patchBooking(req, res) {
         body.notes !== undefined;
 
       if (confirmedLimitedPatch) {
-        if (!canEditBeforeEventCutoff(eventAtForCutoff)) {
+        if (!canEditBeforeEventCutoff(eventAtForCutoff, existing.status)) {
           return errorResponse(
             res,
-            "Booking details can only be updated more than 48 hours before the event.",
+            "Booking details can only be updated more than 12 hours before the event.",
             200,
             "VALIDATION_ERROR",
           );
@@ -789,10 +799,10 @@ async function patchBooking(req, res) {
 
     if (menuItemIds != null || menuLines != null) {
       const menuCutoffAt = primaryEventAtFromRow(existing) ?? existing.eventAt;
-      if (!canEditMenuBeforeEvent(menuCutoffAt)) {
+      if (!canEditMenuBeforeEvent(menuCutoffAt, existing.status)) {
         return errorResponse(
           res,
-          "Menu can only be edited more than 48 hours before the event.",
+          "Menu can only be edited more than 12 hours before the event.",
           200,
           "VALIDATION_ERROR",
         );
@@ -898,15 +908,45 @@ async function patchBooking(req, res) {
           //   "VALIDATION_ERROR",
           // );
         }
+        const nextEventAtForMenu =
+          ev.event_at !== undefined
+            ? ev.event_at
+              ? new Date(ev.event_at)
+              : null
+            : exists.eventAt;
+        // The bulk `events` path historically dropped menu/snapshot fields on a
+        // confirmed booking. Apply them here too, still gated by the same 12h
+        // menu-edit window, so editing an event's menu from the "Update Event"
+        // screen works (not just the dedicated single-event endpoint). Compare
+        // against the stored values so an unchanged snapshot passed through for a
+        // non-target event never trips the window check.
+        const menuEditAllowed = canEditMenuBeforeEvent(
+          nextEventAtForMenu ?? cutoffAt,
+          existing.status,
+        );
+        const snapshotChanged =
+          ev.event_snapshot !== undefined &&
+          JSON.stringify(ev.event_snapshot ?? null) !==
+            JSON.stringify(exists.eventSnapshot ?? null);
+        const dishFieldsChanged =
+          (ev.dish_id !== undefined && ev.dish_id !== (exists.dishId ?? null)) ||
+          (ev.parent_dish_id !== undefined &&
+            ev.parent_dish_id !== (exists.parentDishId ?? null)) ||
+          (ev.is_template !== undefined &&
+            Boolean(ev.is_template) !== Boolean(exists.isTemplate));
+        const touchesEventMenu = snapshotChanged || dishFieldsChanged;
+        if (touchesEventMenu && !menuEditAllowed) {
+          return errorResponse(
+            res,
+            "Menu can only be edited more than 12 hours before the event.",
+            200,
+            "VALIDATION_ERROR",
+          );
+        }
         confirmedEventUpdates.push({
           id: ev.id,
           data: {
-            eventAt:
-              ev.event_at !== undefined
-                ? ev.event_at
-                  ? new Date(ev.event_at)
-                  : null
-                : exists.eventAt,
+            eventAt: nextEventAtForMenu,
             eventLocation:
               ev.event_location !== undefined ? ev.event_location : exists.eventLocation,
             functionType: null,
@@ -919,6 +959,24 @@ async function patchBooking(req, res) {
                 : exists.guestCount,
             notes: ev.notes !== undefined ? ev.notes : exists.notes,
             status: ev.status !== undefined ? ev.status : exists.status,
+            ...(touchesEventMenu && menuEditAllowed
+              ? {
+                  eventSnapshot:
+                    ev.event_snapshot !== undefined
+                      ? ev.event_snapshot
+                      : exists.eventSnapshot,
+                  dishId:
+                    ev.dish_id !== undefined ? ev.dish_id : exists.dishId,
+                  parentDishId:
+                    ev.parent_dish_id !== undefined
+                      ? ev.parent_dish_id
+                      : exists.parentDishId,
+                  isTemplate:
+                    ev.is_template !== undefined
+                      ? Boolean(ev.is_template)
+                      : exists.isTemplate,
+                }
+              : {}),
           },
         });
       }
@@ -1084,9 +1142,19 @@ async function patchBooking(req, res) {
         extraServiceLines: true,
       },
     });
-    const totalFromEvents = computeBookingTotalDueFromEvents(
-      dueSnapshot || existing,
-    );
+    // `dueSnapshot` is read before the update, so its discount/tax/service still
+    // hold the OLD values. Overlay the incoming ones so the event-derived total
+    // reflects this patch (otherwise a discount/tax/service edit persists the new
+    // percentages but leaves total_due computed from the previous values).
+    const dueBasis = {
+      ...(dueSnapshot || existing),
+      serviceChargePct: sc,
+      serviceChargeAmount: pricing.serviceChargeAmount,
+      taxPct: txp,
+      taxAmount: pricing.taxAmount,
+      discountAmount: discount,
+    };
+    const totalFromEvents = computeBookingTotalDueFromEvents(dueBasis);
     if (totalFromEvents > 0) {
       pricing = { ...pricing, totalDue: totalFromEvents };
     }
@@ -1461,10 +1529,10 @@ async function deleteEvent(req, res) {
         "VALIDATION_ERROR",
       );
     }
-    if (!canEditBeforeEventCutoff(target.eventAt)) {
+    if (!canEditBeforeEventCutoff(target.eventAt, existing.status)) {
       return errorResponse(
         res,
-        "Event can only be deleted more than 48 hours before the event time.",
+        "Event can only be deleted more than 12 hours before the event time.",
         200,
         "VALIDATION_ERROR",
       );

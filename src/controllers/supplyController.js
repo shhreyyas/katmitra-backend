@@ -282,11 +282,21 @@ async function listSupplyItems(req, res) {
     const userId = req.user?.userId;
     const language = getRequestedLanguage(req);
     const type = req.query.type ? String(req.query.type).toUpperCase() : undefined;
-    const categorySlug = req.query.category_slug
-      ? String(req.query.category_slug).trim().toLowerCase()
-      : req.query.category
-        ? String(req.query.category).trim().toLowerCase()
-        : undefined;
+    // Accepts one slug or a comma-separated list (multi-select filter).
+    const rawCategory =
+      req.query.category_slug != null
+        ? String(req.query.category_slug)
+        : req.query.category != null
+          ? String(req.query.category)
+          : "";
+    const categorySlugs = [
+      ...new Set(
+        rawCategory
+          .split(",")
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean),
+      ),
+    ];
     const q = String(req.query.q ?? "").trim();
     const qLower = q.toLowerCase();
     const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
@@ -295,7 +305,11 @@ async function listSupplyItems(req, res) {
 
     const filterAnd = [{ isActive: true }];
     if (type && VALID_TYPES.has(type)) filterAnd.push({ type });
-    if (categorySlug) filterAnd.push({ categorySlug });
+    if (categorySlugs.length === 1) {
+      filterAnd.push({ categorySlug: categorySlugs[0] });
+    } else if (categorySlugs.length > 1) {
+      filterAnd.push({ categorySlug: { in: categorySlugs } });
+    }
 
     const visibilityWhere = {
       AND: [{ OR: supplyVisibilityOrBranches(businessId, userId) }, ...filterAnd],
@@ -625,32 +639,40 @@ async function setBookingSupplyItems(req, res) {
       if (msg) return errorResponse(res, msg, 200, "VALIDATION_ERROR");
     }
 
-    await prisma.$transaction(async (tx) => {
-      await tx.bookingSupplyItem.deleteMany({ where: { bookingId } });
-      if (payload.length) {
-        await tx.bookingSupplyItem.createMany({
-          data: payload.map((row) => {
-            const source = byId.get(String(row.supply_item_id));
-            let qty = Math.max(
-              1,
-              Math.min(999, parseInt(String(row.quantity), 10) || 1),
-            );
-            if (source.type === "UTENSIL") {
-              const cap = effectiveUtensilAssignable(source, 0);
-              if (cap != null && qty > cap) qty = cap;
-            }
-            return {
-              bookingId,
-              supplyItemId: source.id,
-              quantity: qty,
-              unit: String(row.unit || source.defaultUnit || "pcs"),
-              categorySlug: source.categorySlug,
-              nameSnapshot: source.name,
-            };
-          }),
-        });
+    const createRows = payload.map((row) => {
+      const source = byId.get(String(row.supply_item_id));
+      // Quantity 0 is kept — a listed item with the amount still to be decided.
+      let qty;
+      if (source.type === "UTENSIL") {
+        const p = parseInt(String(row.quantity), 10);
+        qty = Math.max(0, Math.min(999, Number.isFinite(p) ? p : 0));
+      } else {
+        const p = parseFloat(String(row.quantity));
+        const safe = Number.isFinite(p) && p > 0 ? p : 0;
+        qty = Math.min(999, Math.max(0, Math.round(safe * 100) / 100));
       }
+      if (source.type === "UTENSIL") {
+        const cap = effectiveUtensilAssignable(source, 0);
+        if (cap != null && qty > cap) qty = cap;
+      }
+      return {
+        bookingId,
+        supplyItemId: source.id,
+        quantity: qty,
+        unit: String(row.unit || source.defaultUnit || "pcs"),
+        categorySlug: source.categorySlug,
+        nameSnapshot: source.name,
+      };
     });
+
+    // Array-form transaction: single round trip, no interactive transaction id
+    // for a pooled Supabase connection to lose mid-flight (P2028).
+    await prisma.$transaction([
+      prisma.bookingSupplyItem.deleteMany({ where: { bookingId } }),
+      ...(createRows.length
+        ? [prisma.bookingSupplyItem.createMany({ data: createRows })]
+        : []),
+    ]);
     return successResponse(res, "Supply items updated", { ok: true });
   } catch (e) {
     console.error("setBookingSupplyItems:", e);
@@ -787,49 +809,48 @@ async function setEventSupplyItems(req, res) {
       }
     }
 
-    await prisma.$transaction(async (tx) => {
-      await tx.bookingEventSupplyItem.deleteMany({
-        where: { bookingEventId: eventId, itemType },
-      });
-      if (payload.length) {
-        await tx.bookingEventSupplyItem.createMany({
-          data: payload.map((row) => {
-            const source = byId.get(String(row.supply_item_id));
-            // Ingredients may be fractional (e.g. 1.5 kg); utensils are
-            // discrete countable items and stay whole numbers.
-            let qty =
-              itemType === "INGREDIENT"
-                ? Math.max(
-                    0.01,
-                    Math.min(
-                      999,
-                      Math.round((parseFloat(String(row.quantity)) || 1) * 100) / 100,
-                    ),
-                  )
-                : Math.max(
-                    1,
-                    Math.min(999, parseInt(String(row.quantity), 10) || 1),
-                  );
-            if (itemType === "UTENSIL") {
-              const cap = effectiveUtensilAssignable(
-                source,
-                assignedElsewhereByItem.get(source.id) ?? 0,
-              );
-              if (cap != null && qty > cap) qty = cap;
-            }
-            return {
-              bookingEventId: eventId,
-              supplyItemId: source.id,
-              itemType,
-              quantity: qty,
-              unit: String(row.unit || source.defaultUnit || "pcs"),
-              categorySlug: source.categorySlug,
-              nameSnapshot: source.name,
-            };
-          }),
-        });
+    const createRows = payload.map((row) => {
+      const source = byId.get(String(row.supply_item_id));
+      // Quantity 0 is kept for both types — a listed item whose amount is still
+      // TBD. Ingredients may be fractional (1.5 kg); utensils stay whole.
+      let qty;
+      if (itemType === "INGREDIENT") {
+        const parsedQty = parseFloat(String(row.quantity));
+        const safeQty = Number.isFinite(parsedQty) && parsedQty > 0 ? parsedQty : 0;
+        qty = Math.min(999, Math.max(0, Math.round(safeQty * 100) / 100));
+      } else {
+        const p = parseInt(String(row.quantity), 10);
+        qty = Math.max(0, Math.min(999, Number.isFinite(p) ? p : 0));
       }
+      if (itemType === "UTENSIL") {
+        const cap = effectiveUtensilAssignable(
+          source,
+          assignedElsewhereByItem.get(source.id) ?? 0,
+        );
+        if (cap != null && qty > cap) qty = cap;
+      }
+      return {
+        bookingEventId: eventId,
+        supplyItemId: source.id,
+        itemType,
+        quantity: qty,
+        unit: String(row.unit || source.defaultUnit || "pcs"),
+        categorySlug: source.categorySlug,
+        nameSnapshot: source.name,
+      };
     });
+
+    // Batched (array-form) transaction rather than an interactive callback —
+    // one round trip, no client-held transaction id that a pooled Supabase
+    // connection can drop mid-flight (P2028 "transaction not found").
+    await prisma.$transaction([
+      prisma.bookingEventSupplyItem.deleteMany({
+        where: { bookingEventId: eventId, itemType },
+      }),
+      ...(createRows.length
+        ? [prisma.bookingEventSupplyItem.createMany({ data: createRows })]
+        : []),
+    ]);
     return successResponse(res, "Event supply items updated", { ok: true });
   } catch (e) {
     console.error("setEventSupplyItems:", e);
@@ -1193,7 +1214,13 @@ function computeEventMenuIngredientData(menuItems, guestMul, menuById, language)
  * by the full-booking-PDF endpoint to build the "Ingredients by dish"
  * sub-section for each event.
  */
-async function computeMenuItemIngredientBreakdown(event, businessId, userId, language) {
+async function computeMenuItemIngredientBreakdown(
+  event,
+  businessId,
+  userId,
+  language,
+  includeEmpty = false,
+) {
   const snap = event.eventSnapshot;
   const menuItems = Array.isArray(snap?.menu_items) ? snap.menu_items : [];
   if (menuItems.length === 0) return [];
@@ -1245,11 +1272,15 @@ async function computeMenuItemIngredientBreakdown(event, businessId, userId, lan
     for (const rowEntry of item.rows.values()) {
       const src = supplyById.get(rowEntry.supply_item_id);
       if (!src) continue;
+      const hasQty = rowEntry.quantity > 0;
+      // Recipe ingredient with no quantity defined yet: kept for the working
+      // supply-list view (`includeEmpty`), omitted from PDFs.
+      if (!hasQty && !includeEmpty) continue;
       ingredientsOut.push({
         supply_item_id: rowEntry.supply_item_id,
         name: resolveLocalizedName(src.name, language),
         unit: rowEntry.unit,
-        quantity: roundSupplyQty(rowEntry.quantity),
+        quantity: hasQty ? roundSupplyQty(rowEntry.quantity) : 0,
         category_slug: src.categorySlug,
       });
     }
@@ -1281,6 +1312,11 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
     const userId = req.user?.userId;
     const language = getRequestedLanguage(req);
     const bookingId = req.params.id;
+    // The working "Booking Supply List" screen asks for zero-quantity
+    // ingredients too (so the caterer can see and fill them in); PDF callers
+    // omit this flag and keep zero-quantity rows out.
+    const includeEmpty =
+      req.query.include_empty === "1" || req.query.include_empty === "true";
 
     const booking = await prisma.booking.findFirst({
       where: { id: bookingId, businessId },
@@ -1312,13 +1348,14 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
     const utensilTotals = new Map();
 
     const addToTotals = (map, key, name, unit, eventId, qty, category) => {
-      if (!(qty > 0)) return;
+      const n = Number(qty) || 0;
+      if (n <= 0 && !includeEmpty) return;
       if (!map.has(key)) {
         map.set(key, { name, unit, category, perEvent: new Map(), total: 0 });
       }
       const entry = map.get(key);
-      entry.perEvent.set(eventId, (entry.perEvent.get(eventId) ?? 0) + qty);
-      entry.total += qty;
+      entry.perEvent.set(eventId, (entry.perEvent.get(eventId) ?? 0) + n);
+      entry.total += n;
     };
 
     for (const event of events) {
@@ -1327,6 +1364,7 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
         businessId,
         userId,
         language,
+        includeEmpty,
       );
 
       const savedIngredientRows = savedByEventAndType.get(`${event.id}\tINGREDIENT`) ?? [];
@@ -1740,7 +1778,15 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
           name: resolveLocalizedName(src.name, language),
           unit: useSaved ? saved.unit : rowEntry.unit,
           qty_per_plate: rowEntry.qty_per_plate,
-          quantity: roundSupplyQty(useSaved ? saved.quantity : rowEntry.quantity),
+          // A saved value is an explicit user choice — keep it as-is, including
+          // 0. A recipe ingredient with no quantity defined starts at 0 too
+          // (the caterer sets it here for the first time), rather than the old
+          // filler default of 1.
+          quantity: useSaved
+            ? Math.min(999, Math.max(0, Math.round((Number(saved.quantity) || 0) * 100) / 100))
+            : rowEntry.quantity > 0
+              ? roundSupplyQty(rowEntry.quantity)
+              : 0,
           category_slug: src.categorySlug,
           cost: rowEntry.cost ?? null,
         });
