@@ -224,7 +224,7 @@ const DISH_LIST_MENU_ITEM_SELECT = {
 
 const DISH_LIST_INCLUDE = {
   menuItems: {
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ position: "asc" }, { createdAt: "asc" }],
     select: {
       id: true,
       menuItemId: true,
@@ -376,7 +376,7 @@ async function getDish(req, res) {
       include: {
         menuItems: {
           include: { menuItem: { include: { category: true } } },
-          orderBy: { createdAt: "asc" },
+          orderBy: [{ position: "asc" }, { createdAt: "asc" }],
         },
       },
     });
@@ -463,9 +463,10 @@ async function createDish(req, res) {
         },
       });
       await tx.dishMenuItem.createMany({
-        data: normalized.map((row) => ({
+        data: normalized.map((row, idx) => ({
           dishId: created.id,
           menuItemId: row.menuItemId,
+          position: idx,
           quantity: row.quantity,
           ingredients: row.ingredients,
         })),
@@ -475,7 +476,7 @@ async function createDish(req, res) {
         include: {
           menuItems: {
             include: { menuItem: { include: { category: true } } },
-            orderBy: { createdAt: "asc" },
+            orderBy: [{ position: "asc" }, { createdAt: "asc" }],
           },
         },
       });
@@ -568,9 +569,10 @@ async function updateDish(req, res) {
         await tx.dishMenuItem.deleteMany({ where: { dishId: id } });
         if (normalized.length) {
           await tx.dishMenuItem.createMany({
-            data: normalized.map((row) => ({
+            data: normalized.map((row, idx) => ({
               dishId: id,
               menuItemId: row.menuItemId,
+              position: idx,
               quantity: row.quantity,
               ingredients: row.ingredients,
             })),
@@ -583,7 +585,7 @@ async function updateDish(req, res) {
       include: {
         menuItems: {
           include: { menuItem: { include: { category: true } } },
-          orderBy: { createdAt: "asc" },
+          orderBy: [{ position: "asc" }, { createdAt: "asc" }],
         },
       },
     });

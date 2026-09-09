@@ -633,6 +633,7 @@ model DishMenuItem {
   id          String   @id @default(uuid())
   dishId      String
   menuItemId  String
+  position    Int      @default(0) // caterer-defined order of this item within the dish (drag-and-drop on the Selected tab)
   quantity    Int      @default(1)
   ingredients Json     @default("[]") // per-dish ingredient overrides for this menu item; independent of MenuItem.ingredients
   dish        Dish     @relation(fields: [dishId], references: [id], onDelete: Cascade)
