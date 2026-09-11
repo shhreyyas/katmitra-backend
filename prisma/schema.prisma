@@ -406,7 +406,7 @@ model Booking {
   eventRangeStart DateTime?
   eventRangeEnd   DateTime?
 
-  eventAt DateTime?
+  eventAt       DateTime?
   /// @deprecated Legacy booking-level default venue. Kept for back-compat only —
   /// backfilled into `customerAddress`; new writes go there instead.
   eventLocation String?
@@ -562,6 +562,11 @@ model BookingEventSupplyItem {
   bookingEventId String
   supplyItemId   String
   itemType       SupplyItemType
+  /// The event's menu item this ingredient quantity is scoped to. Null means an
+  /// event-level row (the booking wizard's aggregate list, saved-list apply, or
+  /// pre-menu-scoping legacy rows) — a fallback that any menu-item-scoped row
+  /// for the same supply item shadows. Always null for UTENSIL rows.
+  menuItemId     String?
   /// Ingredient quantities may be fractional (e.g. 1.5 kg); utensils stay
   /// whole numbers by application-layer validation, not by the column type.
   quantity       Float              @default(1)
@@ -575,8 +580,9 @@ model BookingEventSupplyItem {
   bookingEvent BookingEvent @relation(fields: [bookingEventId], references: [id], onDelete: Cascade)
   supplyItem   SupplyItem   @relation(fields: [supplyItemId], references: [id], onDelete: Restrict)
 
-  @@unique([bookingEventId, supplyItemId])
+  @@unique([bookingEventId, supplyItemId, menuItemId])
   @@index([bookingEventId, itemType])
+  @@index([bookingEventId, menuItemId])
   @@index([categorySlug])
 }
 

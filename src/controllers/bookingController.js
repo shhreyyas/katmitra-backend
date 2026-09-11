@@ -1571,23 +1571,127 @@ async function deleteEvent(req, res) {
   }
 }
 
-/** Earliest event time for a booking, or legacy booking.eventAt (matches dashboard bucketing). */
-function deriveBookingEventMs(b) {
-  const evs = b.events || [];
-  let best = NaN;
-  for (const ev of evs) {
-    if (!ev.eventAt) continue;
-    const t = new Date(ev.eventAt).getTime();
-    if (!Number.isNaN(t)) {
-      if (Number.isNaN(best) || t < best) best = t;
+/**
+ * GET /v1/bookings/:id/events/:eventId — one event of a booking, with the
+ * booking context an event view needs (customer, edit windows, this event's
+ * menu snapshot rows and extra-service lines). Everything is scoped to
+ * `req.businessId`; a wrong business or unknown id is a 404.
+ */
+async function getBookingEvent(req, res) {
+  try {
+    const businessId = req.businessId;
+    const bookingId = req.params.id;
+    const eventId = req.params.eventId;
+    const skipImageEnrich =
+      req.query.enrich_images === "0" || req.query.enrich_images === "false";
+
+    const row = await prisma.booking.findFirst({
+      where: { id: bookingId, businessId },
+      include: {
+        menuItems: true,
+        extraServiceLines: true,
+        events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
+      },
+    });
+    if (!row) {
+      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
     }
+
+    const enrichedRow = skipImageEnrich
+      ? row
+      : await enrichEventSnapshotMenuImages(row);
+
+    const events = enrichedRow.events || [];
+    const target = events.find((ev) => ev.id === eventId);
+    if (!target) {
+      return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+    }
+
+    const customerAddress = row.customerAddress ?? row.eventLocation ?? null;
+    const serialized = serializeBookingEvent(target);
+    const effectiveEventLocation =
+      typeof serialized.event_location === "string" &&
+      serialized.event_location.trim()
+        ? serialized.event_location
+        : customerAddress;
+
+    // Menu snapshot rows referenced by this event, resolved against the
+    // booking-level snapshot for price / image / name.
+    const bookingMenuById = new Map(
+      (enrichedRow.menuItems || []).map((mi) => [mi.menuItemId, mi]),
+    );
+    const snapshotRows = Array.isArray(target.eventSnapshot?.menu_items)
+      ? target.eventSnapshot.menu_items
+      : [];
+    const menuItems = snapshotRows.map((r) => {
+      const bm = bookingMenuById.get(r.id);
+      return {
+        menu_item_id: r.id,
+        name_snapshot: r.name ?? bm?.nameSnapshot ?? null,
+        quantity_per_plate: r.quantity_per_plate ?? null,
+        price_per_plate_snapshot: bm ? num(bm.pricePerPlateSnapshot) : null,
+        image_url_snapshot: r.image_url ?? bm?.imageUrlSnapshot ?? null,
+        category: r.category ?? null,
+      };
+    });
+
+    // Extra-service lines tied to this event (single-event bookings also pick up
+    // legacy lines that were never allocated to an event id).
+    const singleEvent = events.length === 1;
+    const extraServiceLines = (enrichedRow.extraServiceLines || [])
+      .filter(
+        (line) =>
+          line.eventId === eventId || (singleEvent && line.eventId == null),
+      )
+      .map((line) => ({
+        id: line.id,
+        booking_id: line.bookingId,
+        event_id: line.eventId ?? null,
+        extra_service_id: line.extraServiceId,
+        quantity: line.quantity ?? 1,
+        unit_price_snapshot: num(line.unitPriceSnapshot),
+        line_total: num(line.lineTotal),
+        title_snapshot: line.titleSnapshot,
+        pricing_type_snapshot: line.pricingTypeSnapshot,
+      }));
+
+    const eventAtForWindows = serialized.event_at ?? row.eventAt ?? null;
+    const payload = {
+      event: {
+        ...serialized,
+        effective_event_location: effectiveEventLocation,
+        event_index: events.findIndex((ev) => ev.id === eventId),
+        event_count: events.length,
+        can_edit_menu: canEditMenuBeforeEvent(eventAtForWindows, row.status),
+        can_edit_details: canEditCustomerDetailsBeforeEvent(
+          eventAtForWindows,
+          row.status,
+        ),
+        menu_items: menuItems,
+        extra_service_lines: extraServiceLines,
+      },
+      booking: {
+        id: row.id,
+        booking_code: row.bookingCode,
+        status: row.status,
+        completed_at: row.completedAt?.toISOString?.() ?? row.completedAt ?? null,
+        customer_name: row.customerName,
+        customer_phone: row.customerPhone,
+        customer_email: row.customerEmail,
+        customer_address: customerAddress,
+        event_range_start:
+          row.eventRangeStart?.toISOString?.() ?? row.eventRangeStart ?? null,
+        event_range_end:
+          row.eventRangeEnd?.toISOString?.() ?? row.eventRangeEnd ?? null,
+        updated_at: row.updatedAt?.toISOString?.() ?? row.updatedAt,
+      },
+    };
+
+    return successResponse(res, "OK", payload);
+  } catch (e) {
+    console.error("getBookingEvent:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
   }
-  if (!Number.isNaN(best)) return best;
-  if (b.eventAt) {
-    const t = new Date(b.eventAt).getTime();
-    return Number.isNaN(t) ? NaN : t;
-  }
-  return NaN;
 }
 
 /**
@@ -1637,29 +1741,39 @@ async function getDashboard(req, res) {
       return sum + outstanding;
     }, 0);
 
+    const startTodayMs = startToday.getTime();
+    const endTodayMs = endToday.getTime();
+    const endTwoDayMs = endTwoDay.getTime();
+    const nowMs = now.getTime();
+
     const todayRaw = [];
     const twoDayRaw = [];
     const upcomingRaw = [];
     const completedRaw = [];
     const pendingManualCompletionRaw = [];
+    let ordersToPrepare = 0;
 
     for (const b of confirmedRows) {
-      const t = deriveBookingEventMs(b);
-      if (Number.isNaN(t)) continue;
-      if (t >= startToday.getTime() && t < endToday.getTime()) {
-        todayRaw.push({ b, t });
-      }
-      if (t >= startToday.getTime() && t < endTwoDay.getTime()) {
-        twoDayRaw.push({ b, t });
-      }
-      if (t >= endToday.getTime()) {
-        upcomingRaw.push({ b, t });
-      }
-      if (b.completedAt) {
-        completedRaw.push({ b, t });
-      }
+      // Bucket by whether ANY of the booking's events falls in a window, not by
+      // a single collapsed timestamp — otherwise a multi-day booking with an
+      // event today AND one next week is placed only by its earliest event and
+      // never reaches "upcoming". The app expands each section per-event and
+      // re-filters by that window, so there's no duplication across sections.
+      const ts = bookingEventTimestampsFromRow(b);
+      if (ts.length === 0) continue;
+      const earliest = ts[0];
+
+      const todayTs = ts.filter((x) => x >= startTodayMs && x < endTodayMs);
+      const twoDayTs = ts.filter((x) => x >= startTodayMs && x < endTwoDayMs);
+      const futureTs = ts.filter((x) => x >= endTodayMs);
+
+      if (todayTs.length) todayRaw.push({ b, t: todayTs[0] });
+      if (twoDayTs.length) twoDayRaw.push({ b, t: twoDayTs[0] });
+      if (futureTs.length) upcomingRaw.push({ b, t: futureTs[0] });
+      if (twoDayTs.some((x) => x >= nowMs)) ordersToPrepare += 1;
+      if (b.completedAt) completedRaw.push({ b, t: earliest });
       if (bookingNeedsPastDayManualCompleteFromRow(b, now)) {
-        pendingManualCompletionRaw.push({ b, t });
+        pendingManualCompletionRaw.push({ b, t: earliest });
       }
     }
 
@@ -1667,8 +1781,6 @@ async function getDashboard(req, res) {
     upcomingRaw.sort((a, b) => a.t - b.t);
     completedRaw.sort((a, b) => b.t - a.t);
     pendingManualCompletionRaw.sort((a, b) => a.t - b.t);
-
-    const ordersToPrepare = twoDayRaw.filter(({ t }) => t >= now.getTime()).length;
 
     const payload = {
       today_event_count: todayRaw.length,
@@ -2341,6 +2453,7 @@ module.exports = {
   updateEvent,
   replaceEventMenuItem,
   deleteEvent,
+  getBookingEvent,
   getDashboard,
   listBookings,
   searchBookingCustomers,

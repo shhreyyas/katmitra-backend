@@ -721,6 +721,15 @@ async function setEventSupplyItems(req, res) {
     if (!VALID_TYPES.has(itemType)) {
       return errorResponse(res, "Invalid type", 200, "VALIDATION_ERROR");
     }
+    // When set, this save replaces only ONE menu item's ingredient list for the
+    // event (per-dish override). When absent it's the event-level list (booking
+    // wizard / saved-list apply). Utensils are never menu-item scoped.
+    const menuItemId =
+      itemType === "INGREDIENT" &&
+      typeof body.menu_item_id === "string" &&
+      body.menu_item_id.trim()
+        ? body.menu_item_id.trim()
+        : null;
     const payload = Array.isArray(body.items) ? body.items : [];
     const booking = await prisma.booking.findFirst({
       where: { id: bookingId, businessId },
@@ -833,6 +842,7 @@ async function setEventSupplyItems(req, res) {
         bookingEventId: eventId,
         supplyItemId: source.id,
         itemType,
+        menuItemId,
         quantity: qty,
         unit: String(row.unit || source.defaultUnit || "pcs"),
         categorySlug: source.categorySlug,
@@ -840,13 +850,34 @@ async function setEventSupplyItems(req, res) {
       };
     });
 
+    const submittedSupplyIds = [
+      ...new Set(createRows.map((r) => r.supplyItemId)),
+    ];
+
     // Batched (array-form) transaction rather than an interactive callback —
     // one round trip, no client-held transaction id that a pooled Supabase
     // connection can drop mid-flight (P2028 "transaction not found").
     await prisma.$transaction([
+      // Replace exactly this scope's rows: one menu item's list, or (menuItemId
+      // null) the event-level list.
       prisma.bookingEventSupplyItem.deleteMany({
-        where: { bookingEventId: eventId, itemType },
+        where: { bookingEventId: eventId, itemType, menuItemId },
       }),
+      // Saving a menu item's list takes ownership of those supply items from any
+      // event-level fallback row, so the two can't double-count in whole-event
+      // aggregates.
+      ...(menuItemId && submittedSupplyIds.length
+        ? [
+            prisma.bookingEventSupplyItem.deleteMany({
+              where: {
+                bookingEventId: eventId,
+                itemType,
+                menuItemId: null,
+                supplyItemId: { in: submittedSupplyIds },
+              },
+            }),
+          ]
+        : []),
       ...(createRows.length
         ? [prisma.bookingEventSupplyItem.createMany({ data: createRows })]
         : []),
@@ -994,16 +1025,28 @@ async function getEventSupplyItems(req, res) {
       },
       orderBy: { createdAt: "asc" },
     });
+    // An ingredient may now be saved once per dish for the event — collapse to
+    // one flat line per (supply item, unit) so callers see a single quantity.
+    const byKey = new Map();
+    for (const row of rows) {
+      const key = `${row.itemType}\t${row.supplyItemId}\t${row.unit}`;
+      const prev = byKey.get(key);
+      if (prev) {
+        prev.quantity += Number(row.quantity) || 0;
+      } else {
+        byKey.set(key, {
+          supply_item_id: row.supplyItemId,
+          quantity: Number(row.quantity) || 0,
+          unit: row.unit,
+          category: row.categorySlug,
+          type: row.itemType,
+          name: resolveLocalizedName(row.nameSnapshot, lang),
+          name_i18n: normalizeLocalizedName(row.nameSnapshot) || { en: "" },
+        });
+      }
+    }
     return successResponse(res, "OK", {
-      items: rows.map((row) => ({
-        supply_item_id: row.supplyItemId,
-        quantity: row.quantity,
-        unit: row.unit,
-        category: row.categorySlug,
-        type: row.itemType,
-        name: resolveLocalizedName(row.nameSnapshot, lang),
-        name_i18n: normalizeLocalizedName(row.nameSnapshot) || { en: "" },
-      })),
+      items: [...byKey.values()],
     });
   } catch (e) {
     console.error("getEventSupplyItems:", e);
@@ -1030,8 +1073,10 @@ async function updateEventSupplyItem(req, res) {
         "VALIDATION_ERROR",
       );
     }
+    // This single-item endpoint only touches event-level rows; per-dish
+    // overrides are managed through setEventSupplyItems with a menu_item_id.
     const row = await prisma.bookingEventSupplyItem.findFirst({
-      where: { bookingEventId: eventId, supplyItemId },
+      where: { bookingEventId: eventId, supplyItemId, menuItemId: null },
     });
     if (!row) return errorResponse(res, "Supply item not found", 404, "NOT_FOUND");
     await prisma.bookingEventSupplyItem.update({
@@ -1077,7 +1122,7 @@ async function deleteEventSupplyItem(req, res) {
       );
     }
     await prisma.bookingEventSupplyItem.deleteMany({
-      where: { bookingEventId: eventId, supplyItemId },
+      where: { bookingEventId: eventId, supplyItemId, menuItemId: null },
     });
     return successResponse(res, "Event supply item deleted", { ok: true });
   } catch (e) {
@@ -1561,9 +1606,37 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       where: { bookingEventId: eventId, itemType: "INGREDIENT" },
       orderBy: { createdAt: "asc" },
     });
-    const savedBySupplyId = new Map(
-      savedRows.map((r) => [r.supplyItemId, r]),
-    );
+    // Per-dish overrides win on their own card; event-level (menuItemId null)
+    // rows are a fallback that applies only where an ingredient maps to a
+    // single dish.
+    const savedByMenuItem = new Map();
+    const savedEventLevel = new Map();
+    for (const r of savedRows) {
+      if (r.menuItemId) {
+        let m = savedByMenuItem.get(r.menuItemId);
+        if (!m) {
+          m = new Map();
+          savedByMenuItem.set(r.menuItemId, m);
+        }
+        m.set(r.supplyItemId, r);
+      } else {
+        savedEventLevel.set(r.supplyItemId, r);
+      }
+    }
+    // Whole-event flat view (`suggestions`, wizard screen): a supply item's
+    // saved amount is the sum of every scope it was saved in.
+    const savedAggBySupplyId = new Map();
+    for (const r of savedRows) {
+      const prev = savedAggBySupplyId.get(r.supplyItemId);
+      if (prev) {
+        prev.quantity += Number(r.quantity) || 0;
+      } else {
+        savedAggBySupplyId.set(r.supplyItemId, {
+          quantity: Number(r.quantity) || 0,
+          unit: r.unit,
+        });
+      }
+    }
     const hasSavedIngredients = savedRows.length > 0;
 
     if (menuItems.length === 0) {
@@ -1722,7 +1795,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
         "kg";
       const templateQty = roundSupplyQty(total);
       const templateUnit = unit;
-      const saved = savedBySupplyId.get(sid);
+      const saved = savedAggBySupplyId.get(sid);
       suggestions.push({
         supply_item_id: src.id,
         name: resolveLocalizedName(src.name, language),
@@ -1737,9 +1810,9 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       seenSupplyIds.add(sid);
     }
 
-    for (const saved of savedRows) {
-      if (seenSupplyIds.has(saved.supplyItemId)) continue;
-      const src = supplyById.get(saved.supplyItemId);
+    for (const [sid, saved] of savedAggBySupplyId) {
+      if (seenSupplyIds.has(sid)) continue;
+      const src = supplyById.get(sid);
       if (!src) continue;
       const defaultUnit =
         src.defaultUnit ||
@@ -1757,39 +1830,77 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
         category_slug: src.categorySlug,
         from_menu: false,
       });
-      seenSupplyIds.add(saved.supplyItemId);
+      seenSupplyIds.add(sid);
     }
 
     suggestions.sort((a, b) =>
       String(a.name || "").localeCompare(String(b.name || "")),
     );
 
+    const clampSavedQty = (q) =>
+      Math.min(999, Math.max(0, Math.round((Number(q) || 0) * 100) / 100));
+
     const menu_items = [];
     for (const item of byMenuItem.values()) {
+      const cardSaved = savedByMenuItem.get(item.menu_item_id);
+      const emittedForCard = new Set();
       const ingredientsOut = [];
       for (const rowEntry of item.rows.values()) {
         const src = supplyById.get(rowEntry.supply_item_id);
         if (!src) continue;
-        const saved = savedBySupplyId.get(rowEntry.supply_item_id);
-        const useSaved =
-          saved && supplyItemMenuItemCount.get(rowEntry.supply_item_id) === 1;
+        // Precedence: this dish's own saved override → event-level saved value
+        // (only when the ingredient maps to a single dish, so it's
+        // unambiguous) → recipe template.
+        const perDish = cardSaved?.get(rowEntry.supply_item_id);
+        const eventLevel = savedEventLevel.get(rowEntry.supply_item_id);
+        const savedRow =
+          perDish ||
+          (eventLevel &&
+          supplyItemMenuItemCount.get(rowEntry.supply_item_id) === 1
+            ? eventLevel
+            : null);
+        const rowUnit = savedRow ? savedRow.unit : rowEntry.unit;
         ingredientsOut.push({
           supply_item_id: rowEntry.supply_item_id,
           name: resolveLocalizedName(src.name, language),
-          unit: useSaved ? saved.unit : rowEntry.unit,
+          unit: rowUnit,
+          // This supply item's own units (set when it was created), so the
+          // picker offers the right choices instead of the generic catalog.
+          unit_options: supplyUnitOptionsForRow(src, rowUnit),
           qty_per_plate: rowEntry.qty_per_plate,
           // A saved value is an explicit user choice — keep it as-is, including
           // 0. A recipe ingredient with no quantity defined starts at 0 too
           // (the caterer sets it here for the first time), rather than the old
           // filler default of 1.
-          quantity: useSaved
-            ? Math.min(999, Math.max(0, Math.round((Number(saved.quantity) || 0) * 100) / 100))
+          quantity: savedRow
+            ? clampSavedQty(savedRow.quantity)
             : rowEntry.quantity > 0
               ? roundSupplyQty(rowEntry.quantity)
               : 0,
           category_slug: src.categorySlug,
           cost: rowEntry.cost ?? null,
         });
+        emittedForCard.add(rowEntry.supply_item_id);
+      }
+      // Ingredients this dish had saved for the event but that aren't in its
+      // recipe (added straight on the edit screen) — without this they'd
+      // vanish on reload and be deleted on the next save.
+      if (cardSaved) {
+        for (const [sid, row] of cardSaved) {
+          if (emittedForCard.has(sid)) continue;
+          const src = supplyById.get(sid);
+          if (!src) continue;
+          ingredientsOut.push({
+            supply_item_id: sid,
+            name: resolveLocalizedName(src.name, language),
+            unit: row.unit,
+            unit_options: supplyUnitOptionsForRow(src, row.unit),
+            qty_per_plate: 0,
+            quantity: clampSavedQty(row.quantity),
+            category_slug: src.categorySlug,
+            cost: null,
+          });
+        }
       }
       menu_items.push({
         menu_item_id: item.menu_item_id,

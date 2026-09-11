@@ -583,8 +583,10 @@ async function assignSupplySavedListToBookingEvent(req, res) {
       for (const itemType of ["INGREDIENT", "UTENSIL"]) {
         const payload =
           itemType === "INGREDIENT" ? ingredientPayload : utensilPayload;
+        // Only the event-level list — leave per-dish ingredient overrides
+        // (menuItemId set) intact; they layer on top at read time.
         await tx.bookingEventSupplyItem.deleteMany({
-          where: { bookingEventId: eventId, itemType },
+          where: { bookingEventId: eventId, itemType, menuItemId: null },
         });
         if (payload.length) {
           await tx.bookingEventSupplyItem.createMany({
@@ -605,6 +607,7 @@ async function assignSupplySavedListToBookingEvent(req, res) {
                 bookingEventId: eventId,
                 supplyItemId: source.id,
                 itemType,
+                menuItemId: null,
                 quantity: qty,
                 unit: String(
                   row.unit || source.defaultUnit || (itemType === "UTENSIL" ? "pcs" : "kg"),

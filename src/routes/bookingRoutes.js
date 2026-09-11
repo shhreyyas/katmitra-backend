@@ -9,6 +9,7 @@ const {
   updateEvent,
   replaceEventMenuItem,
   deleteEvent,
+  getBookingEvent,
   getDashboard,
   listBookings,
   searchBookingCustomers,
@@ -109,6 +110,14 @@ router.post(
   authMiddleware,
   businessContextMiddleware,
   cancelBooking,
+);
+
+// Fetch a single booking event (event details view)
+router.get(
+  "/v1/bookings/:id/events/:eventId",
+  authMiddleware,
+  businessContextMiddleware,
+  getBookingEvent,
 );
 
 // Update Booking Event
