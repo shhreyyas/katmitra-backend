@@ -1083,13 +1083,13 @@ exports.deleteMenuItem = async (req, res) => {
       );
     }
 
-    if (!dgDel && menu.createdByUserId !== userId) {
+    if (!dgDel && menu.businessId !== businessId) {
       return errorResponse(
         res,
         "You do not have permission to delete this item.",
         403,
         "FORBIDDEN",
-        "This item belongs to another user.",
+        "This item belongs to another business.",
       );
     }
 
