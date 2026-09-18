@@ -753,6 +753,15 @@ async function convertQuotationToBooking(req, res) {
       if (already) {
         return successResponse(res, "Already converted", serializeBooking(already));
       }
+      // `convertedBookingId` is set but the booking is gone (e.g. permanently
+      // deleted) — refuse rather than silently minting a duplicate booking for
+      // a quotation that already believes itself converted.
+      return errorResponse(
+        res,
+        "This quotation's converted booking no longer exists and can't be re-converted automatically.",
+        409,
+        "CONVERTED_BOOKING_MISSING",
+      );
     }
 
     if (isQuotationExpired(existing)) {

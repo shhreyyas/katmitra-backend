@@ -12,6 +12,7 @@ const {
   getBookingEvent,
   getDashboard,
   listBookings,
+  listPayments,
   searchBookingCustomers,
   getBooking,
   completeBookingOrder,
@@ -70,6 +71,14 @@ router.get(
   authMiddleware,
   businessContextMiddleware,
   listBookings,
+);
+
+// Payments recorded within a date range (payment-statement PDF filter)
+router.get(
+  "/v1/listPayments",
+  authMiddleware,
+  businessContextMiddleware,
+  listPayments,
 );
 
 // Schedule tab — bookings + quotations in one response

@@ -399,6 +399,17 @@ async function generateUniqueBookingCode(tx, businessId) {
   throw new Error("BOOKING_CODE_ALLOC_FAILED");
 }
 
+/** Shared wire shape for a `PaymentTransaction` row — used by `serializeBooking`'s
+ * embedded `payments` array and `listPayments` alike, so the two stay in sync. */
+function serializePaymentTransaction(p) {
+  return {
+    id: p.id,
+    amount: num(p.amount),
+    method: p.method,
+    created_at: p.createdAt?.toISOString?.() ?? p.createdAt,
+  };
+}
+
 function serializeBooking(b, { includePayments = true } = {}) {
   const menuItems = (b.menuItems || []).map((mi) => ({
     id: mi.id,
@@ -411,12 +422,7 @@ function serializeBooking(b, { includePayments = true } = {}) {
 
   const payments =
     includePayments && b.payments
-      ? b.payments.map((p) => ({
-          id: p.id,
-          amount: num(p.amount),
-          method: p.method,
-          created_at: p.createdAt?.toISOString?.() ?? p.createdAt,
-        }))
+      ? b.payments.map(serializePaymentTransaction)
       : undefined;
 
   // Customer address is the live default an event inherits when it has no
@@ -2048,6 +2054,78 @@ async function listBookings(req, res) {
 }
 
 /**
+ * GET /v1/listPayments
+ * Payments recorded for the business within [from, to] (by PaymentTransaction.createdAt),
+ * for the payment-statement PDF's date-range filter. Payments have no businessId column of
+ * their own, so scoping goes through the `booking` relation.
+ */
+async function listPayments(req, res) {
+  try {
+    const businessId = req.businessId;
+    const { limit, offset } = req.query;
+    const from = queryStringParam(req.query.from);
+    const to = queryStringParam(req.query.to);
+
+    const createdAt = {};
+    if (from) createdAt.gte = new Date(from);
+    if (to) createdAt.lte = new Date(to);
+
+    const where = {
+      booking: { businessId },
+      ...(from || to ? { createdAt } : {}),
+    };
+
+    const take = queryNumberParam(limit, 200, { min: 1, max: 500 });
+    const skip = queryNumberParam(offset, 0, { min: 0, max: 100_000 });
+
+    const [rows, total] = await Promise.all([
+      prisma.paymentTransaction.findMany({
+        where,
+        select: {
+          id: true,
+          amount: true,
+          method: true,
+          createdAt: true,
+          booking: {
+            select: {
+              id: true,
+              bookingCode: true,
+              customerName: true,
+              customerPhone: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        take,
+        skip,
+      }),
+      prisma.paymentTransaction.count({ where }),
+    ]);
+
+    const has_more = skip + rows.length < total;
+
+    return successResponse(res, "OK", {
+      payments: rows.map((p) => ({
+        ...serializePaymentTransaction(p),
+        booking: {
+          id: p.booking.id,
+          booking_code: p.booking.bookingCode,
+          customer_name: p.booking.customerName,
+          customer_phone: p.booking.customerPhone,
+        },
+      })),
+      total,
+      limit: take,
+      offset: skip,
+      has_more,
+    });
+  } catch (e) {
+    console.error("listPayments:", e);
+    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+  }
+}
+
+/**
  * GET /v1/bookings/:id
  */
 async function getBooking(req, res) {
@@ -2150,7 +2228,10 @@ async function completeBookingOrder(req, res) {
 
 /**
  * DELETE /v1/deleteBooking/:id
- * Deletes a draft booking for current business.
+ * Deletes a booking (draft, confirmed, or cancelled) for current business,
+ * cascading its payments/events/etc. Bookings already marked complete
+ * (`completedAt` set) are protected — those are treated as settled
+ * accounting records and can't be deleted.
  */
 async function deleteBooking(req, res) {
   try {
@@ -2159,27 +2240,82 @@ async function deleteBooking(req, res) {
 
     const existing = await prisma.booking.findFirst({
       where: { id: bookingId, businessId },
-      select: { id: true, status: true },
+      select: {
+        id: true,
+        status: true,
+        completedAt: true,
+        customerName: true,
+        customerPhone: true,
+        amountPaid: true,
+      },
     });
     if (!existing) {
       return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
     }
-    if (existing.status !== "DRAFT") {
+    if (existing.completedAt) {
       return errorResponse(
         res,
-        "Only draft bookings can be deleted",
+        "Completed orders cannot be deleted",
         200,
         "VALIDATION_ERROR",
       );
     }
 
-    await prisma.$transaction(async (tx) => {
-      await tx.bookingMenuItem.deleteMany({ where: { bookingId } });
-      await tx.paymentTransaction.deleteMany({ where: { bookingId } });
-      await tx.booking.delete({ where: { id: bookingId } });
-    });
+    const wasDraft = existing.status === "DRAFT";
+    const userId = req.user?.userId ?? null;
 
-    return successResponse(res, "Draft deleted", { id: bookingId });
+    try {
+      await prisma.$transaction(async (tx) => {
+        /**
+         * `deleteMany` with `completedAt: null` re-checks the completed-lockout
+         * inside the transaction — closes the race where a concurrent
+         * completeBookingOrder call sets `completedAt` between our lookup above
+         * and this delete. `count === 0` means that race happened (or the
+         * booking was already deleted) and aborts the transaction.
+         * `bookingMenuItem`/`paymentTransaction`/events and their children all
+         * cascade at the DB level (see prisma/schema.prisma), so a single
+         * `booking` delete is sufficient — no manual per-table cleanup needed.
+         */
+        const deleted = await tx.booking.deleteMany({
+          where: { id: bookingId, completedAt: null },
+        });
+        if (deleted.count === 0) {
+          throw new Error("BOOKING_COMPLETED_RACE");
+        }
+        if (!wasDraft) {
+          // Written in the same transaction as the delete (not the fire-and-forget
+          // logActivity helper) so a failed audit write rolls back the deletion
+          // instead of silently losing the only record that this money existed.
+          await tx.activityLog.create({
+            data: {
+              type: "booking_deleted",
+              message: `Order deleted: ${existing.customerName || existing.customerPhone || bookingId} (status was ${existing.status}, amount paid ${existing.amountPaid})`,
+              actorUserId: userId,
+              meta: {
+                bookingId,
+                businessId,
+                status: existing.status,
+                amountPaid: existing.amountPaid,
+              },
+            },
+          });
+        }
+      });
+    } catch (e) {
+      if (e.message === "BOOKING_COMPLETED_RACE") {
+        return errorResponse(
+          res,
+          "Completed orders cannot be deleted",
+          200,
+          "VALIDATION_ERROR",
+        );
+      }
+      throw e;
+    }
+
+    return successResponse(res, wasDraft ? "Draft deleted" : "Order deleted", {
+      id: bookingId,
+    });
   } catch (e) {
     console.error("deleteBooking:", e);
     return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
@@ -2456,6 +2592,7 @@ module.exports = {
   getBookingEvent,
   getDashboard,
   listBookings,
+  listPayments,
   searchBookingCustomers,
   getBooking,
   completeBookingOrder,
