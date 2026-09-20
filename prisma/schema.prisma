@@ -63,6 +63,7 @@ model Business {
   users                User[]
   serviceLinks         BusinessServiceType[]
   menuItems            MenuItem[]
+  menuCategories       MenuCategory[]
   dishes               Dish[]
   bookings             Booking[]
   quotations           Quotation[]
@@ -73,6 +74,26 @@ model Business {
   extraServices        ExtraService[]
   billingSubscriptions BillingSubscription[]
   billingPaymentEvents BillingPaymentEvent[]
+  owners               BusinessOwner[]
+}
+
+/// Up to 3 owners per business, one marked primary. Supersedes Business.ownerName for new
+/// writes — that legacy column is kept (never dropped) and backfilled into a primary row
+/// by the introducing migration, but new code should read/write via this table only.
+/// Business.contactNumber remains the business's own general phone, independent of any
+/// individual owner's phone here.
+model BusinessOwner {
+  id         String   @id @default(uuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  phone      String?
+  isPrimary  Boolean  @default(false)
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([businessId])
 }
 
 /// Mirrors Razorpay subscription; one row per active/historical app subscription.
@@ -148,6 +169,7 @@ model User {
   business                Business?            @relation(fields: [businessId], references: [id])
   businessesCreated       Business[]           @relation("BusinessCreatedBy")
   menuItemsCreated        MenuItem[]
+  menuCategoriesCreated   MenuCategory[]
   supplyItemsCreated      SupplyItem[]
   supplySavedListsCreated SupplySavedList[]    @relation("SupplySavedListCreator")
   extraServicesCreated    ExtraService[]
@@ -300,19 +322,31 @@ model MenuItem {
   @@index([categorySlug])
 }
 
-/// Global menu categories (admin-managed). Names are localized JSON maps.
+/// Menu categories. Admin-managed rows are global (isGlobal=true, businessId=null).
+/// A business can additionally create its own private categories, visible business-wide
+/// (not restricted to the creating user) — see menuController.js's OR-visibility pattern
+/// for the analogous, stricter, per-creator MenuItem convention this deliberately differs from.
 model MenuCategory {
-  id        String     @id @default(uuid())
-  name      Json
-  slug      String     @unique
-  sortOrder Int        @default(0)
-  isActive  Boolean    @default(true)
+  id              String  @id @default(uuid())
+  name            Json
+  slug            String  @unique
+  sortOrder       Int     @default(0)
+  isActive        Boolean @default(true)
+  businessId      String?
+  createdByUserId String?
+  isGlobal        Boolean @default(true)
+
+  business  Business?  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy User?      @relation(fields: [createdByUserId], references: [id])
   menuItems MenuItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([isActive, sortOrder])
+  @@index([businessId])
+  @@index([createdByUserId])
+  @@index([isGlobal])
 }
 
 model OtpCode {
@@ -411,6 +445,8 @@ model Booking {
   /// backfilled into `customerAddress`; new writes go there instead.
   eventLocation String?
   functionType  String?
+  /// "labor" | "contract" — free-text like functionType, validated at the application layer.
+  kitchenType   String?
   guestCount    Int?
   notes         String?   @db.Text
 
@@ -426,6 +462,7 @@ model Booking {
 
   menuItems         BookingMenuItem[]
   supplyItems       BookingSupplyItem[]
+  supplySavedLists  SupplySavedList[]
   payments          PaymentTransaction[]
   events            BookingEvent[]
   extraServiceLines BookingExtraServiceLine[]
@@ -674,6 +711,8 @@ model Quotation {
   clientEmail         String?
   clientAddress       String?
   functionType        String?
+  /// "labor" | "contract" — free-text like functionType, validated at the application layer.
+  kitchenType         String?
   eventDate           DateTime?
   guestCount          Int       @default(0)
   discountAmount      Decimal   @default(0) @db.Decimal(12, 2)
@@ -775,8 +814,14 @@ model SupplySavedList {
   createdByUserId String?
   createdBy       User?                 @relation("SupplySavedListCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   title           String                @db.VarChar(512)
+  /// Set for a list scoped to one specific event (manual per-event save flow).
   bookingEventId  String?
   bookingEvent    BookingEvent?         @relation(fields: [bookingEventId], references: [id], onDelete: SetNull)
+  /// Set for a list combining every event on a booking (auto-saved on
+  /// confirmBooking) — mutually exclusive with bookingEventId by convention,
+  /// not enforced at the DB level.
+  bookingId       String?
+  booking         Booking?              @relation(fields: [bookingId], references: [id], onDelete: SetNull)
   categoriesLabel String?               @db.VarChar(512)
   createdAt       DateTime              @default(now())
   updatedAt       DateTime              @updatedAt
@@ -784,6 +829,7 @@ model SupplySavedList {
 
   @@index([businessId, createdAt(sort: Desc)])
   @@index([bookingEventId])
+  @@index([bookingId])
 }
 
 model SupplySavedListItem {

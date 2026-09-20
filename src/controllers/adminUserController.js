@@ -132,6 +132,7 @@ exports.getUser = async (req, res) => {
         business: {
           include: {
             serviceLinks: { include: { serviceType: true } },
+            owners: { orderBy: [{ isPrimary: "desc" }, { sortOrder: "asc" }] },
           },
         },
       },

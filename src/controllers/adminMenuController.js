@@ -15,6 +15,12 @@ function deriveIsGlobal(businessId, createdByUserId) {
   return false;
 }
 
+/**
+ * Same ingredient-row shape and "qty is per 100 guests" convention as
+ * menuController.js's normalizeIngredients/hasValidIngredients (duplicated
+ * here rather than shared — pre-existing tech debt, not introduced by this
+ * change). See md/menu.md.
+ */
 function normalizeIngredients(raw) {
   if (raw == null) return [];
   if (!Array.isArray(raw)) return [];
@@ -341,7 +347,43 @@ exports.deleteMenuItem = async (req, res) => {
     if (!existing) {
       return errorResponse(res, "Menu item not found", 404, "NOT_FOUND");
     }
-    await prisma.menuItem.delete({ where: { id } });
+
+    // Same onDelete: Restrict relations as menuController.js's deleteMenuItem
+    // — a global item that's already been booked/quoted/added to a dish by
+    // any business can't be hard-deleted; steer the admin to deactivate it.
+    const [bookingUse, quotationUse, dishUse] = await Promise.all([
+      prisma.bookingMenuItem.findFirst({ where: { menuItemId: id }, select: { id: true } }),
+      prisma.quotationMenuItem.findFirst({ where: { menuItemId: id }, select: { id: true } }),
+      prisma.dishMenuItem.findFirst({ where: { menuItemId: id }, select: { id: true } }),
+    ]);
+    if (bookingUse || quotationUse || dishUse) {
+      return errorResponse(
+        res,
+        "This item is used in a booking, quotation, or dish. Deactivate it instead.",
+        422,
+        "MENU_ITEM_IN_USE",
+        "This item is used in a booking, quotation, or dish. Deactivate it instead.",
+      );
+    }
+
+    try {
+      await prisma.menuItem.delete({ where: { id } });
+    } catch (deleteError) {
+      if (
+        deleteError instanceof Prisma.PrismaClientKnownRequestError &&
+        deleteError.code === "P2003"
+      ) {
+        return errorResponse(
+          res,
+          "This item is used in a booking, quotation, or dish. Deactivate it instead.",
+          422,
+          "MENU_ITEM_IN_USE",
+          "This item is used in a booking, quotation, or dish. Deactivate it instead.",
+        );
+      }
+      throw deleteError;
+    }
+
     return successResponse(res, "Menu item deleted", { id });
   } catch (error) {
     console.error("deleteMenuItem admin:", error.message);

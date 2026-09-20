@@ -17,6 +17,7 @@ function formatQuotationListRow(q) {
     client_name: q.clientName,
     client_phone: q.clientPhone,
     function_type: q.functionType,
+    kitchen_type: q.kitchenType ?? null,
     event_date: q.eventDate?.toISOString?.() ?? null,
     guest_count: q.guestCount,
     status: q.status,

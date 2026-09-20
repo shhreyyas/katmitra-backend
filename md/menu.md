@@ -168,6 +168,25 @@ Display items in this order to surface the most actionable items first:
 - `created_by` and `business_id` are set server-side — do not send them in the request body.
 - On success, append the new item to the list and scroll to it.
 
+### Ingredient Row Shape
+
+Each entry in `ingredients` is `{ name, qty, unit, cost, supply_item_id? }` (`qty`/`cost` optional). Rows may reference a Supply catalog `INGREDIENT` item via `supply_item_id` (validated server-side, must be active and visible to the business) or be free-text.
+
+**`qty` is the amount of that ingredient needed to prepare the dish for 100 guests — not 1 guest/plate.** Every consumer that scales this recipe for an actual event (`GET /v1/bookings/:id/events/:eventId/suggestedSupplyFromMenu`, the full-booking-PDF ingredient breakdown, and Dish ingredient totals — all in `supplyController.js`/`dishController.js`) divides `qty` by 100 before multiplying by `quantity_per_plate × guest_count`. This convention was introduced 2026-09-19; ingredient rows created before that date were migrated ×100 by a one-time data migration (`prisma/migrations/20260919120000_ingredient_qty_per_100_guests`) so they continue to compute correctly.
+
+### Categories
+
+**API:** `GET /api/v1/menu-categories`, `POST /api/v1/menu-categories`, `PUT /api/v1/menu-categories/:id`, `DELETE /api/v1/menu-categories/:id` (all `authMiddleware` + `businessContextMiddleware`).
+
+A business can add its own custom category, in addition to picking from the admin-curated global list:
+- `GET /api/v1/menu-categories` returns the same shape as the older, still-public `GET /api/v1/get-category` (`{ categories: [{ id, name, slug, sort_order, is_active, is_global, created_at, updated_at }] }`) — merged: every `is_global: true` row plus this business's own `is_global: false` rows.
+- `POST /api/v1/menu-categories` takes `{ name }`, creates a category with `businessId`/`createdByUserId` set and `is_global: false`. Rejects with `DUPLICATE` if a category with that name (case-insensitive) is already visible to the business.
+- `PUT /api/v1/menu-categories/:id` takes `{ name }` and renames a category — **only if it's this business's own private category**; a global category, or one owned by a different business, is rejected with `403 FORBIDDEN`. The `slug` is never changed by this endpoint (menu items reference categories by `category_slug`, so changing it would silently reassign every item using it).
+- `DELETE /api/v1/menu-categories/:id` — same ownership rule as update. Refuses with `422 CATEGORY_IN_USE` if any menu item still references this category's slug; the business must move or delete those items first.
+- **Visibility is business-wide, not per-creator** — any user of the business sees and can use (or edit/delete) a category any teammate created, unlike `MenuItem`'s stricter "private (my menu): creator only" rule in the Core Concepts table above. This is a deliberate difference; don't assume the two follow the same rule.
+- A menu item's `category_slug` must resolve to either a global category or one owned by the requesting business (`menuController.js`'s `loadCategoryBySlug`) — a business cannot attach another business's private category to their own menu item.
+- The old public `GET /api/v1/get-category` (no auth) is unchanged and still returns only the global set — it's kept for any caller that doesn't have business context.
+
 ---
 
 ## 5. Edit Menu Item Screen
@@ -225,7 +244,7 @@ When a user taps Edit on a global item:
 | Description | From `description` when present |
 | Image | From `image_url` when present |
 | Category & food type | Show as badges |
-| Ingredients | Itemised list with individual costs |
+| Ingredients | Itemised list with individual costs — `qty` is the amount for 100 guests, see [Ingredient Row Shape](#ingredient-row-shape) in Section 4 |
 | Estimated cost | `sum(ingredients[].cost)` |
 | Profit | `price_per_person - estimated_cost` |
 | Profit margin | `(profit / price_per_person) * 100` — display as `%` |

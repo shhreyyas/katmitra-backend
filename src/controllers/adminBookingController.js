@@ -33,6 +33,7 @@ function formatBookingListRow(booking) {
     event_at: eventAt?.toISOString?.() ?? null,
     event_location: firstEvent?.eventLocation ?? booking.eventLocation,
     function_type: booking.functionType ?? firstEvent?.functionType,
+    kitchen_type: booking.kitchenType ?? null,
     guest_count: booking.guestCount ?? firstEvent?.guestCount,
     status: booking.status,
     payment_status: booking.paymentStatus,

@@ -36,6 +36,38 @@ async function resolveBusinessLogoUrl({ business_logo, business_logo_base64, bus
   return { ok: true, url: url || null };
 }
 
+const MAX_BUSINESS_OWNERS = 3;
+
+/**
+ * Normalizes a request `owners` array into DB-ready rows. Returns `null` when `rawOwners`
+ * isn't an array at all (caller should fall back to legacy single-owner behavior for
+ * backward compatibility with app builds that don't send `owners`), or `[]` when the
+ * caller explicitly sent an owners array that resolved to zero valid entries.
+ * Guarantees: at most 3 rows, each with a non-empty trimmed name, and exactly one
+ * isPrimary — defaults to the first row when none/multiple are marked `is_primary`,
+ * rather than hard-rejecting the request over that mistake.
+ */
+function normalizeOwnersInput(rawOwners) {
+  if (!Array.isArray(rawOwners)) return null;
+  const cleaned = rawOwners
+    .map((o) => ({
+      name: typeof o?.name === "string" ? o.name.trim() : "",
+      phone:
+        o?.phone == null || o?.phone === "" ? null : String(o.phone).trim(),
+      isPrimary: o?.is_primary === true,
+    }))
+    .filter((o) => o.name.length > 0)
+    .slice(0, MAX_BUSINESS_OWNERS);
+  if (cleaned.length === 0) return [];
+  const primaryIdx = cleaned.findIndex((o) => o.isPrimary);
+  return cleaned.map((o, i) => ({
+    name: o.name,
+    phone: o.phone,
+    isPrimary: i === (primaryIdx === -1 ? 0 : primaryIdx),
+    sortOrder: i,
+  }));
+}
+
 const ALLOWED_CATERING = new Set(["veg", "non_veg"]);
 /**
  * POST /api/v1/createServiceTypes
@@ -172,6 +204,7 @@ exports.registerBusiness = async (req, res) => {
       years_of_experience,
       business_register_number,
       gst_number,
+      owners,
     } = req.body;
 
     const yoe = years_of_experience !== undefined ? Number(years_of_experience) : 0;
@@ -220,6 +253,19 @@ exports.registerBusiness = async (req, res) => {
         "VALIDATION_ERROR",
       );
     }
+
+    const ownersInput =
+      normalizeOwnersInput(owners) ??
+      (String(business_owner_name ?? "").trim()
+        ? [
+            {
+              name: String(business_owner_name).trim(),
+              phone: resolvedContact || null,
+              isPrimary: true,
+              sortOrder: 0,
+            },
+          ]
+        : []);
 
     if (Array.isArray(catering_types)) {
       for (const ct of catering_types) {
@@ -317,6 +363,18 @@ exports.registerBusiness = async (req, res) => {
         });
       }
 
+      if (ownersInput.length > 0) {
+        await tx.businessOwner.createMany({
+          data: ownersInput.map((o) => ({
+            businessId: b.id,
+            name: o.name,
+            phone: o.phone,
+            isPrimary: o.isPrimary,
+            sortOrder: o.sortOrder,
+          })),
+        });
+      }
+
       const userUpdate = { businessId: b.id };
       if (isUnsetPdfPrefix(user.pdfPrefix)) {
         userUpdate.pdfPrefix = deriveDefaultPdfPrefix(business_name);
@@ -331,6 +389,7 @@ exports.registerBusiness = async (req, res) => {
         where: { id: b.id },
         include: {
           serviceLinks: { include: { serviceType: true } },
+          owners: { orderBy: [{ isPrimary: "desc" }, { sortOrder: "asc" }] },
         },
       });
     });
@@ -426,6 +485,7 @@ exports.updateBusiness = async (req, res) => {
       default_service_charge_pct,
       default_tax_pct,
       terms_and_conditions,
+      owners,
     } = req.body;
 
     const data = {};
@@ -495,7 +555,10 @@ exports.updateBusiness = async (req, res) => {
       data.termsAndConditions = trimmed || null;
     }
 
-    if (Object.keys(data).length === 0) {
+    const ownersProvided = Array.isArray(owners);
+    const normalizedOwners = ownersProvided ? normalizeOwnersInput(owners) : null;
+
+    if (Object.keys(data).length === 0 && !ownersProvided) {
       return errorResponse(
         res,
         "No fields to update",
@@ -504,15 +567,34 @@ exports.updateBusiness = async (req, res) => {
       );
     }
 
-    await prisma.business.update({
-      where: { id: businessId },
-      data,
+    await prisma.$transaction(async (tx) => {
+      if (Object.keys(data).length > 0) {
+        await tx.business.update({ where: { id: businessId }, data });
+      }
+      // Replace-in-place: owners have no stable client-supplied id to diff against
+      // (the app resends the full list on every save), so a full delete+recreate
+      // is simpler and safe within this transaction.
+      if (ownersProvided) {
+        await tx.businessOwner.deleteMany({ where: { businessId } });
+        if (normalizedOwners.length > 0) {
+          await tx.businessOwner.createMany({
+            data: normalizedOwners.map((o) => ({
+              businessId,
+              name: o.name,
+              phone: o.phone,
+              isPrimary: o.isPrimary,
+              sortOrder: o.sortOrder,
+            })),
+          });
+        }
+      }
     });
 
     const fullBusiness = await prisma.business.findUnique({
       where: { id: businessId },
       include: {
         serviceLinks: { include: { serviceType: true } },
+        owners: { orderBy: [{ isPrimary: "desc" }, { sortOrder: "asc" }] },
       },
     });
 

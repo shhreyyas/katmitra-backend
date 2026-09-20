@@ -151,6 +151,14 @@ async function fetchSupplyItemNameMap(ids, language) {
  * per-dish absolute amount (set via the per-item ingredient editor), so it
  * must NOT be multiplied by DishMenuItem.quantity again — only the recipe
  * fallback (a true per-unit rate) needs that scaling.
+ *
+ * As of the "per 100 guests" convention, `MenuItem.ingredients[].qty` (and
+ * any `DishMenuItem.ingredients` override) is itself already expressed for
+ * 100 guests, so `buildTotalRequiredIngredients`'s `total_quantity` output
+ * implicitly means "total for 100 guests of this dish composition" — no
+ * guest-scaling math lives here, only the per-unit `DishMenuItem.quantity`
+ * multiplier, so nothing in this function needs to change for that
+ * convention.
  */
 function ingredientsSourceForRow(row) {
   const own = parseIngredients(row.ingredients);

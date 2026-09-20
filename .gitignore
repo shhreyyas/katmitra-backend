@@ -30,3 +30,6 @@ coverage
 .DS_Store
 Thumbs.db
 /src/generated/prisma
+
+# Local database backups (contain live data – never commit)
+backups/

@@ -10,6 +10,8 @@
 
 **This phase of quotation work is complete as of 2026-08-26.** Covered in this pass: expiry status + confirm-blocking (client + server), PDF price-hide toggle, Terms & Conditions wiring, itemized additional services, i18n across all quotation screens and PDF text, and several bug fixes (date-sync on edit, fake business identity in the legacy PDF path, per-event date-picker bounds, i18n interpolation syntax for the validity line). Everything above reflects that state. Known gaps that were consciously left out are listed in [§11](#11-known-gaps--deliberate-scope-exclusions) — not oversights, don't "clean them up" without checking first.
 
+**2026-09-20 update:** Added `Quotation.kitchenType` (plain nullable `String`, "labor"/"contract", mirrors `functionType`'s convention exactly — see §1/§9) and removed the "Quotation valid until" display from the PDF header and Terms & Conditions (Pipeline B only — Pipeline A never had it). The underlying expiry computation (`isQuotationExpired`/`computeQuotationExpiryDate`, §2) is **unchanged** — only its PDF *display* was removed; the expired badge and confirm-blocking still work exactly as before. `formatQuotationPdfExpiresTwoDaysBeforeEvent` (app) was deleted as dead code since nothing renders its output anymore.
+
 If you're picking this doc up again later: re-read it in full before making changes, and update it in the same commit/session as any code change it describes — don't let it drift.
 
 ---
@@ -37,9 +39,9 @@ Four Prisma models, all under `katmitra-backend/prisma/schema.prisma`, deliberat
 
 | Model | Mirrors | Notes |
 |---|---|---|
-| `Quotation` | `Booking` | Has `status` enum (`DRAFT`/`SALE`/`SENT`/`ACCEPTED`), client fields, discount/service%/tax%, computed `subtotal`/`serviceChargeAmount`/`taxAmount`/`total`, `platePrice`. |
+| `Quotation` | `Booking` | Has `status` enum (`DRAFT`/`SALE`/`SENT`/`ACCEPTED`), client fields, `functionType`/`kitchenType` (both plain nullable `String`, no enum), discount/service%/tax%, computed `subtotal`/`serviceChargeAmount`/`taxAmount`/`total`, `platePrice`. |
 | `QuotationEvent` | `BookingEvent` | One row per event/session (breakfast/lunch/dinner) — a quotation can span several. Has `eventAt`, `guestCount`, `eventSnapshot` (JSON menu snapshot), `eventTotal`. |
-| `QuotationMenuItem` | `BookingMenuItem` | Legacy flat mirror of `events[0]`'s menu — kept for backward compatibility; **never the source of truth for pricing**, only `events[].extraServiceLines`/snapshot are. |
+| `QuotationMenuItem` | `BookingMenuItem` | Legacy flat mirror of `events[0]`'s menu — kept for backward compatibility; **never the source of truth for pricing**, only `events[].extraServiceLines`/snapshot are. It also has **no stable server-side ordering** (`quotationInclude` has no `orderBy`), so it must never drive menu-item *sequence* either — `newQuotations.tsx` reloads the first event's menu order/name/category from `event_snapshot.menu_items` and uses this table only to look up per-item price by id. |
 | `QuotationExtraServiceLine` | `BookingExtraServiceLine` | Additional/optional services attached to one `QuotationEvent`. Has `titleSnapshot`, `quantity`, `unitPriceSnapshot`, `lineTotal`, `pricingTypeSnapshot`. |
 | `QuotationReminder` | `BookingReminder` | Dedup table for push-notification reminders (`@@unique([quotationId, reminderType])`). |
 
@@ -133,7 +135,9 @@ Used by: `quotationsPDF.tsx`, `quotations.tsx` (list Share icon), `newQuotations
 
 Sourced from the business's own `Business.termsAndConditions` (Settings → Terms & Conditions) — the **same field** already used for the Booking PDF (`bookingPdf.ts`). Passed as `businessDetails.terms` into `quotationDtoToPdfDocument`, or `companyTerms` into `buildMultiEventQuotationPdfDocument` directly.
 
-Behavior (`buildQuotationTermsLineSets` in `quotationPdf.ts`): if the business has set custom terms, use them (split by newline) instead of the 5 localized defaults (`t("quotationPdfDefaultTerms")`). The validity line (`t("quotationPdfTermsValidity")`, `__DATE__` substituted — **not** `%{date}` or `{{date}}`, see the i18n note below) is **always** appended regardless — it's derived per-quotation data, not editable terms text. This mirrors `bookingPdf.ts`'s pattern except quotations always show *something* (the defaults) when the business hasn't customized, whereas Booking shows no terms section at all in that case — that's deliberate, keep it that way unless asked to change it.
+Behavior (`buildQuotationTermsLineSets` in `quotationPdf.ts`): if the business has set custom terms, use them (split by newline) instead of the 5 localized defaults (`t("quotationPdfDefaultTerms")`). This mirrors `bookingPdf.ts`'s pattern except quotations always show *something* (the defaults) when the business hasn't customized, whereas Booking shows no terms section at all in that case — that's deliberate, keep it that way unless asked to change it.
+
+**No validity/expiry line as of 2026-09-20** — the "valid until" sentence used to always be appended last (regardless of custom vs. default terms); it was removed from both the terms list and the PDF header per an explicit request. `isQuotationExpired`/`computeQuotationExpiryDate` (§2) still gate the expired badge and confirm-blocking — only the PDF text went away, not the underlying rule. Don't re-add the validity sentence to `buildQuotationTermsLineSets` without confirming the requirement changed back.
 
 Pipeline A has no equivalent — no terms section exists there at all (§5, §11).
 
@@ -186,7 +190,9 @@ console.log('missing in hi:', [...ek].filter(k=>!(k in hi)));
 console.log('missing in gu:', [...ek].filter(k=>!(k in gu)));
 "
 ```
-Interpolation uses `i18n-js`'s `%{param}` syntax (e.g. `t("quotationsConfirmMessage", { quoteId })`), never manual string concatenation for translated sentences — **except** `quotationPdfTermsValidity`, which deliberately uses a plain `__DATE__` token instead. That key is fetched via `t(key)` with **no params**, because the real date isn't known until deep inside `buildQuotationTermsLineSets` (a pure builder with no `t()` of its own) — and i18n-js interpolates *both* `%{...}` **and** `{{...}}` tokens unconditionally, even with no params supplied, producing `[missing "<token>" value]` rather than leaving it untouched. A subsequent manual `.replace()` on that text then finds and clobbers the literal token still sitting inside the missing-value message, producing garbled output like `[missing "26 August 2026" value]` — this shipped twice in a row because the first fix (`%{date}` → `{{date}}`) was based on an assumption about i18n-js's syntax instead of testing it, and `{{...}}` turned out to be recognized too. If you ever add another "resolve the real value later, outside `t()`" placeholder: use a token i18n-js's interpolator won't match (e.g. `__DATE__`), and **verify it against the actual library** before trusting it — a two-line `node -e "..."` script with `i18n-js`'s `I18n` class and the real JSON file, like the one used to catch this, is enough. Don't reason about interpolation syntax from memory.
+Interpolation uses `i18n-js`'s `%{param}` syntax (e.g. `t("quotationsConfirmMessage", { quoteId })`), never manual string concatenation for translated sentences. (Historical note: `quotationPdfTermsValidity` used to need a special `__DATE__`-token workaround here because `i18n-js` interpolates unmatched `%{...}`/`{{...}}` tokens even with no params — that key was removed 2026-09-20 along with the validity-line feature itself, so the workaround no longer applies anywhere in this file. If you ever add another "resolve the real value later, outside `t()`" placeholder, re-derive this from scratch against the actual library rather than assuming — don't reason about interpolation syntax from memory.)
+
+**Kitchen Type keys** (added 2026-09-20, `en`/`hi`/`gu` only — same 3-language scope as everything else in this file): `bookingKitchenTypeLabel`/`Placeholder`/`ModalTitle`/`Labor`/`Contract` (form picker, shared with Booking — `bookingKitchenType*` prefix, not `quotationKitchenType*`, since the picker component and constants file are shared between the two flows), `bookingPdfKitchenTypeLabel` (Booking-family PDFs), `quotationPdfHeaderKitchenType` (Quotation PDF header — replaced the removed `quotationPdfHeaderExpires`).
 
 ---
 

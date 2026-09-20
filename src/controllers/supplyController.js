@@ -6,6 +6,7 @@ const {
   normalizeLocalizedName,
   resolveLocalizedName,
 } = require("../utils/localization");
+const { apiMessage } = require("../utils/apiMessages");
 
 const VALID_TYPES = new Set(["INGREDIENT", "UTENSIL"]);
 
@@ -18,6 +19,26 @@ function deriveSupplyIsGlobal(businessId, createdByUserId) {
   return false;
 }
 
+/**
+ * Resolves every active SupplyItemCategory's slug to a localized display
+ * label in one query — used wherever a response emits a raw `category_slug`
+ * alongside a human-readable label (see supplySavedListController.js's
+ * identical catBySlug pattern).
+ */
+async function buildSupplyCategoryLabelMap(language) {
+  const rows = await prisma.supplyItemCategory.findMany({ where: { isActive: true } });
+  const map = new Map();
+  for (const row of rows) {
+    map.set(row.slug, resolveLocalizedName(row.name, language));
+  }
+  return map;
+}
+
+function supplyCategoryLabelFor(categoryLabelMap, slug) {
+  if (!slug) return null;
+  return categoryLabelMap.get(slug) ?? slug;
+}
+
 /** List/select visibility mirrors menu listMenuItems OR-branches. */
 function supplyVisibilityOrBranches(businessId, userId) {
   return [
@@ -25,6 +46,31 @@ function supplyVisibilityOrBranches(businessId, userId) {
     { businessId: null, OR: [{ createdByUserId: userId }, { isGlobal: true }] },
     { createdByUserId: userId },
   ];
+}
+
+/**
+ * Same name is fine in a different category, but not twice in the same one —
+ * checked case-insensitively (in the requester's language) among items
+ * visible to them (global + their own), matching the picker they'd actually
+ * see this new/renamed item next to.
+ */
+async function findDuplicateSupplyItem({ businessId, userId, categorySlug, names, language, excludeId }) {
+  const requestedLower = resolveLocalizedName(names, language).trim().toLowerCase();
+  if (!requestedLower) return null;
+  const rows = await prisma.supplyItem.findMany({
+    where: {
+      isActive: true,
+      categorySlug,
+      OR: supplyVisibilityOrBranches(businessId, userId),
+      ...(excludeId ? { NOT: { id: excludeId } } : {}),
+    },
+    select: { id: true, name: true },
+  });
+  return (
+    rows.find(
+      (r) => resolveLocalizedName(r.name, language).trim().toLowerCase() === requestedLower,
+    ) ?? null
+  );
 }
 
 /** Remaining assignable stock for a utensil (total − damaged − assigned elsewhere). */
@@ -129,13 +175,13 @@ async function listSupplyItemCategories(req, res) {
       });
       const slugSet = [...new Set(supplyRows.map((r) => r.categorySlug))];
       if (slugSet.length === 0) {
-        return successResponse(res, "OK", { categories: [] });
+        return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), { categories: [] });
       }
       const rows = await prisma.supplyItemCategory.findMany({
         where: { isActive: true, slug: { in: slugSet } },
         orderBy: { sortOrder: "asc" },
       });
-      return successResponse(res, "OK", {
+      return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
         categories: rows.map((row) => serializeSupplyItemCategory(row, language)),
       });
     }
@@ -144,12 +190,12 @@ async function listSupplyItemCategories(req, res) {
       where: { isActive: true },
       orderBy: { sortOrder: "asc" },
     });
-    return successResponse(res, "OK", {
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
       categories: rows.map((row) => serializeSupplyItemCategory(row, language)),
     });
   } catch (e) {
     console.error("listSupplyItemCategories:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -209,6 +255,24 @@ async function createSupplyItem(req, res) {
       );
     }
 
+    const requestedLanguage = getRequestedLanguage(req);
+    const dup = await findDuplicateSupplyItem({
+      businessId,
+      userId,
+      categorySlug: categoryRow.slug,
+      names,
+      language: requestedLanguage,
+    });
+    if (dup) {
+      return errorResponse(
+        res,
+        apiMessage("supplyItem.duplicate", requestedLanguage),
+        200,
+        "DUPLICATE",
+        apiMessage("supplyItem.duplicateDetail", requestedLanguage),
+      );
+    }
+
     const availableCount =
       body.available_count == null
         ? null
@@ -249,7 +313,7 @@ async function createSupplyItem(req, res) {
     );
   } catch (e) {
     console.error("createSupplyItem:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -326,7 +390,7 @@ async function listSupplyItems(req, res) {
           include: { category: true },
         }),
       ]);
-      return successResponse(res, "OK", {
+      return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
         items: rows.map((row) => serializeSupplyItem(row, language)),
         pagination: buildPagination(page, limit, total, rows.length),
       });
@@ -341,13 +405,13 @@ async function listSupplyItems(req, res) {
     const filteredRows = allMatching.filter((row) => nameMatchesSearch(row, qLower));
     const total = filteredRows.length;
     const pageRows = filteredRows.slice(skip, skip + limit);
-    return successResponse(res, "OK", {
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
       items: pageRows.map((row) => serializeSupplyItem(row, language)),
       pagination: buildPagination(page, limit, total, pageRows.length),
     });
   } catch (e) {
     console.error("listSupplyItems:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -421,6 +485,28 @@ async function updateSupplyItem(req, res) {
       }
       patch.categorySlug = categoryRow.slug;
     }
+
+    if (patch.name || patch.categorySlug) {
+      const requestedLanguage = getRequestedLanguage(req);
+      const dup = await findDuplicateSupplyItem({
+        businessId,
+        userId,
+        categorySlug: patch.categorySlug ?? existing.categorySlug,
+        names: patch.name ?? existing.name,
+        language: requestedLanguage,
+        excludeId: id,
+      });
+      if (dup) {
+        return errorResponse(
+          res,
+          apiMessage("supplyItem.duplicate", requestedLanguage),
+          200,
+          "DUPLICATE",
+          apiMessage("supplyItem.duplicateDetail", requestedLanguage),
+        );
+      }
+    }
+
     if (patch.unitOptions && patch.unitOptions.length === 0) {
       return errorResponse(
         res,
@@ -469,7 +555,7 @@ async function updateSupplyItem(req, res) {
     );
   } catch (e) {
     console.error("updateSupplyItem:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -491,7 +577,7 @@ async function deleteSupplyItem(req, res) {
     return successResponse(res, "Supply item deleted", { id });
   } catch (e) {
     console.error("deleteSupplyItem:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -500,12 +586,12 @@ async function listSupplyUnits(req, res) {
     const rows = await prisma.unit.findMany({
       orderBy: [{ name: "asc" }, { createdAt: "desc" }],
     });
-    return successResponse(res, "OK", {
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
       units: rows.map(serializeSupplyUnit),
     });
   } catch (e) {
     console.error("listSupplyUnits:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -526,7 +612,7 @@ async function createSupplyUnit(req, res) {
     return successResponse(res, "Supply unit created", serializeSupplyUnit(row));
   } catch (e) {
     console.error("createSupplyUnit:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -560,7 +646,7 @@ async function updateSupplyUnit(req, res) {
     return successResponse(res, "Supply unit updated", serializeSupplyUnit(row));
   } catch (e) {
     console.error("updateSupplyUnit:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -573,7 +659,7 @@ async function deleteSupplyUnit(req, res) {
     return successResponse(res, "Supply unit deleted", { id });
   } catch (e) {
     console.error("deleteSupplyUnit:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -587,7 +673,7 @@ async function setBookingSupplyItems(req, res) {
       where: { id: bookingId, businessId },
       select: { id: true, status: true },
     });
-    if (!booking) return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    if (!booking) return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     if (booking.status === "CANCELLED") {
       return errorResponse(
         res,
@@ -649,7 +735,7 @@ async function setBookingSupplyItems(req, res) {
       } else {
         const p = parseFloat(String(row.quantity));
         const safe = Number.isFinite(p) && p > 0 ? p : 0;
-        qty = Math.min(999, Math.max(0, Math.round(safe * 100) / 100));
+        qty = Math.max(0, Math.round(safe * 100) / 100);
       }
       if (source.type === "UTENSIL") {
         const cap = effectiveUtensilAssignable(source, 0);
@@ -676,7 +762,7 @@ async function setBookingSupplyItems(req, res) {
     return successResponse(res, "Supply items updated", { ok: true });
   } catch (e) {
     console.error("setBookingSupplyItems:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -689,12 +775,12 @@ async function getBookingSupplyItems(req, res) {
       where: { id: bookingId, businessId },
       select: { id: true },
     });
-    if (!booking) return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    if (!booking) return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     const rows = await prisma.bookingSupplyItem.findMany({
       where: { bookingId },
       orderBy: { createdAt: "asc" },
     });
-    return successResponse(res, "OK", {
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
       items: rows.map((row) => ({
         supply_item_id: row.supplyItemId,
         quantity: row.quantity,
@@ -706,7 +792,7 @@ async function getBookingSupplyItems(req, res) {
     });
   } catch (e) {
     console.error("getBookingSupplyItems:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -735,7 +821,7 @@ async function setEventSupplyItems(req, res) {
       where: { id: bookingId, businessId },
       select: { id: true, status: true },
     });
-    if (!booking) return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    if (!booking) return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     if (booking.status === "CANCELLED") {
       return errorResponse(
         res,
@@ -748,7 +834,7 @@ async function setEventSupplyItems(req, res) {
       where: { id: eventId, bookingId },
       select: { id: true },
     });
-    if (!event) return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+    if (!event) return errorResponse(res, apiMessage("bookingEvent.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     const ids = [
       ...new Set(
         payload
@@ -826,7 +912,10 @@ async function setEventSupplyItems(req, res) {
       if (itemType === "INGREDIENT") {
         const parsedQty = parseFloat(String(row.quantity));
         const safeQty = Number.isFinite(parsedQty) && parsedQty > 0 ? parsedQty : 0;
-        qty = Math.min(999, Math.max(0, Math.round(safeQty * 100) / 100));
+        // No realistic upper bound for ingredient quantities — a large event
+        // (1000+ guests) can need well over 999 kg/ltr of a base ingredient.
+        // Only utensil counts get a hard cap.
+        qty = Math.max(0, Math.round(safeQty * 100) / 100);
       } else {
         const p = parseInt(String(row.quantity), 10);
         qty = Math.max(0, Math.min(999, Number.isFinite(p) ? p : 0));
@@ -885,7 +974,7 @@ async function setEventSupplyItems(req, res) {
     return successResponse(res, "Event supply items updated", { ok: true });
   } catch (e) {
     console.error("setEventSupplyItems:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -916,12 +1005,12 @@ async function getBookingEventsSupplySummaries(req, res) {
       },
     });
     if (!booking) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
 
     const eventIds = booking.events.map((e) => e.id);
     if (eventIds.length === 0) {
-      return successResponse(res, "OK", { summaries: {} });
+      return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), { summaries: {} });
     }
 
     const [grouped, savedLists] = await Promise.all([
@@ -955,10 +1044,10 @@ async function getBookingEventsSupplySummaries(req, res) {
       );
     }
 
-    return successResponse(res, "OK", { summaries });
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), { summaries });
   } catch (e) {
     console.error("getBookingEventsSupplySummaries:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -980,7 +1069,7 @@ async function getEventSupplySummary(req, res) {
       select: { id: true },
     });
     if (!event) {
-      return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("bookingEvent.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
 
     const [grouped, savedList] = await Promise.all([
@@ -1002,7 +1091,7 @@ async function getEventSupplySummary(req, res) {
     );
   } catch (e) {
     console.error("getEventSupplySummary:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1017,7 +1106,7 @@ async function getEventSupplyItems(req, res) {
       where: { id: bookingId, businessId },
       select: { id: true },
     });
-    if (!booking) return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    if (!booking) return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     const rows = await prisma.bookingEventSupplyItem.findMany({
       where: {
         bookingEventId: eventId,
@@ -1045,12 +1134,12 @@ async function getEventSupplyItems(req, res) {
         });
       }
     }
-    return successResponse(res, "OK", {
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
       items: [...byKey.values()],
     });
   } catch (e) {
     console.error("getEventSupplyItems:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1064,7 +1153,7 @@ async function updateEventSupplyItem(req, res) {
       where: { id: bookingId, businessId },
       select: { id: true, status: true },
     });
-    if (!booking) return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    if (!booking) return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     if (booking.status === "CANCELLED") {
       return errorResponse(
         res,
@@ -1098,7 +1187,7 @@ async function updateEventSupplyItem(req, res) {
     return successResponse(res, "Event supply item updated", { ok: true });
   } catch (e) {
     console.error("updateEventSupplyItem:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1112,7 +1201,7 @@ async function deleteEventSupplyItem(req, res) {
       where: { id: bookingId, businessId },
       select: { id: true, status: true },
     });
-    if (!booking) return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    if (!booking) return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     if (booking.status === "CANCELLED") {
       return errorResponse(
         res,
@@ -1127,7 +1216,7 @@ async function deleteEventSupplyItem(req, res) {
     return successResponse(res, "Event supply item deleted", { ok: true });
   } catch (e) {
     console.error("deleteEventSupplyItem:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1158,11 +1247,50 @@ function normalizeMenuIngredients(raw) {
  * recipe scaled to 2.5 kg) — round to 2 decimals instead of ceiling to a
  * whole number so precision survives. A non-positive input still means "no
  * computed value yet" and keeps the previous friendly default of 1.
+ *
+ * No upper bound: a recipe scaled to a large event (1000+ guests) can
+ * legitimately need well over 999 kg/ltr of a base ingredient — capping here
+ * silently truncated those totals.
  */
 function roundSupplyQty(n) {
   const v = Number(n) || 0;
   if (v <= 0) return 1;
-  return Math.min(999, Math.max(0.01, Math.round(v * 100) / 100));
+  return Math.max(0.01, Math.round(v * 100) / 100);
+}
+
+const WEIGHT_UNIT_TO_G = { kg: 1000, g: 1, gram: 1, grams: 1 };
+const VOLUME_UNIT_TO_ML = {
+  ltr: 1000,
+  l: 1000,
+  litre: 1000,
+  litres: 1000,
+  liter: 1000,
+  liters: 1000,
+  ml: 1,
+  millilitre: 1,
+  millilitres: 1,
+  milliliter: 1,
+  milliliters: 1,
+};
+
+/**
+ * Converts `qty` from `fromUnit` to `toUnit` when both are known weight or
+ * volume units (kg/g, ltr/ml and spelling variants). Units that don't match
+ * a known family (pcs, or an outright mismatch like weight vs volume) can't
+ * be safely combined, so the raw quantity is returned unchanged rather than
+ * silently producing a wrong number.
+ */
+function convertSupplyQty(qty, fromUnit, toUnit) {
+  const from = String(fromUnit ?? "").trim().toLowerCase();
+  const to = String(toUnit ?? "").trim().toLowerCase();
+  if (!from || !to || from === to) return qty;
+  if (from in WEIGHT_UNIT_TO_G && to in WEIGHT_UNIT_TO_G) {
+    return (qty * WEIGHT_UNIT_TO_G[from]) / WEIGHT_UNIT_TO_G[to];
+  }
+  if (from in VOLUME_UNIT_TO_ML && to in VOLUME_UNIT_TO_ML) {
+    return (qty * VOLUME_UNIT_TO_ML[from]) / VOLUME_UNIT_TO_ML[to];
+  }
+  return qty;
 }
 
 function supplyUnitOptionsForRow(src, preferredUnit) {
@@ -1183,6 +1311,11 @@ function supplyUnitOptionsForRow(src, preferredUnit) {
  * breakdown (for `menu_items`) in one pass. Extracted so
  * `computeMenuItemIngredientBreakdown` (used by the full-booking-PDF
  * endpoint) can reuse the exact same scaling math without duplicating it.
+ *
+ * `baseQty` (from `MenuItem.ingredients[].qty` / `DishMenuItem.ingredients[].qty`)
+ * is defined as the amount of that ingredient needed for 100 guests (not 1
+ * guest/plate) — `scaled = (baseQty / 100) * plates` converts the recipe
+ * quantity into the actual amount needed for this event's guest count.
  */
 function computeEventMenuIngredientData(menuItems, guestMul, menuById, language) {
   /** key = supplyItemId + "\t" + unit -> scaled numeric qty */
@@ -1218,11 +1351,20 @@ function computeEventMenuIngredientData(menuItems, guestMul, menuById, language)
       const q = Number(String(rawQty ?? "").trim());
       const baseQty = Number.isFinite(q) && q > 0 ? q : 0;
       const unit = String(ing?.unit ?? "").trim() || "kg";
-      const scaled = baseQty * plates;
+      // baseQty is the recipe amount for 100 guests; divide back to a
+      // per-guest rate before scaling by this event's plate count.
+      const scaled = (baseQty / 100) * plates;
       if (!sid) {
         const nm = String(ing?.name ?? "").trim();
         if (nm) {
-          legacy.push({ name: nm, unit, note: "no_supply_item_id" });
+          legacy.push({
+            name: nm,
+            unit,
+            note: "no_supply_item_id",
+            menu_item_id: mid,
+            qty: baseQty,
+            cost: Number.isFinite(Number(ing?.cost)) ? Number(ing.cost) : null,
+          });
         }
         continue;
       }
@@ -1265,6 +1407,7 @@ async function computeMenuItemIngredientBreakdown(
   userId,
   language,
   includeEmpty = false,
+  categoryLabelMap = new Map(),
 ) {
   const snap = event.eventSnapshot;
   const menuItems = Array.isArray(snap?.menu_items) ? snap.menu_items : [];
@@ -1327,6 +1470,7 @@ async function computeMenuItemIngredientBreakdown(
         unit: rowEntry.unit,
         quantity: hasQty ? roundSupplyQty(rowEntry.quantity) : 0,
         category_slug: src.categorySlug,
+        category_label: supplyCategoryLabelFor(categoryLabelMap, src.categorySlug),
       });
     }
     return {
@@ -1367,7 +1511,9 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
       where: { id: bookingId, businessId },
       select: { id: true },
     });
-    if (!booking) return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    if (!booking) return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
+
+    const categoryLabelMap = await buildSupplyCategoryLabelMap(language);
 
     const events = await prisma.bookingEvent.findMany({
       where: { bookingId },
@@ -1399,8 +1545,15 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
         map.set(key, { name, unit, category, perEvent: new Map(), total: 0 });
       }
       const entry = map.get(key);
-      entry.perEvent.set(eventId, (entry.perEvent.get(eventId) ?? 0) + n);
-      entry.total += n;
+      // Different events can save the same supply item in different units
+      // (e.g. 100 ml for one event, 10 ltr for another, from a manually
+      // added item's unit picker) — convert into the unit this row was
+      // first recorded in before summing, otherwise the raw numbers get
+      // added together as if they were the same unit (100 + 10 = 110,
+      // instead of 100 ml + 10000 ml = 10100 ml).
+      const converted = convertSupplyQty(n, unit, entry.unit);
+      entry.perEvent.set(eventId, (entry.perEvent.get(eventId) ?? 0) + converted);
+      entry.total += converted;
     };
 
     for (const event of events) {
@@ -1410,22 +1563,51 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
         userId,
         language,
         includeEmpty,
+        categoryLabelMap,
       );
 
       const savedIngredientRows = savedByEventAndType.get(`${event.id}\tINGREDIENT`) ?? [];
       const savedUtensilRows = savedByEventAndType.get(`${event.id}\tUTENSIL`) ?? [];
+
+      // Recipe-derived ingredients are always recomputed from the current
+      // guest count (never taken from a saved row) so a stale save from
+      // before a guestCount change can't under/over-count the booking-wide
+      // total — see menu.md's per-100-guests scaling convention. A saved row
+      // only contributes here when it's a manual addition with no matching
+      // menu-recipe ingredient for this event.
+      const menuDerivedSupplyIds = new Set();
+      for (const item of menuItemsBreakdown) {
+        for (const ing of item.ingredients) {
+          menuDerivedSupplyIds.add(ing.supply_item_id);
+        }
+      }
+      // Ingredients saved directly on the event (e.g. from the Booking Supply
+      // List screen) that aren't part of any dish's recipe — without this
+      // they only ever showed up in the booking-wide totals table, never in
+      // this event's own ingredient section.
+      const extraIngredientRows = savedIngredientRows.filter(
+        (row) => !menuDerivedSupplyIds.has(row.supplyItemId),
+      );
 
       eventsOut.push({
         event_id: event.id,
         menu_items: menuItemsBreakdown.map(({ menu_item_id, name, ingredients }) => ({
           menu_item_id,
           name,
-          ingredients: ingredients.map(({ name: n, unit, quantity, category_slug }) => ({
+          ingredients: ingredients.map(({ name: n, unit, quantity, category_slug, category_label }) => ({
             name: n,
             unit,
             quantity,
             category_slug,
+            category_label,
           })),
+        })),
+        extra_ingredients: extraIngredientRows.map((row) => ({
+          name: resolveLocalizedName(row.nameSnapshot, language),
+          unit: row.unit,
+          quantity: row.quantity,
+          category_slug: row.categorySlug,
+          category_label: supplyCategoryLabelFor(categoryLabelMap, row.categorySlug),
         })),
         utensils: savedUtensilRows.map((row) => ({
           name: resolveLocalizedName(row.nameSnapshot, language),
@@ -1434,32 +1616,29 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
         })),
       });
 
-      if (savedIngredientRows.length > 0) {
-        for (const row of savedIngredientRows) {
+      for (const item of menuItemsBreakdown) {
+        for (const ing of item.ingredients) {
           addToTotals(
             ingredientTotals,
-            row.supplyItemId,
-            resolveLocalizedName(row.nameSnapshot, language),
-            row.unit,
+            ing.supply_item_id,
+            ing.name,
+            ing.unit,
             event.id,
-            row.quantity,
-            row.categorySlug,
+            ing.quantity,
+            ing.category_slug,
           );
         }
-      } else {
-        for (const item of menuItemsBreakdown) {
-          for (const ing of item.ingredients) {
-            addToTotals(
-              ingredientTotals,
-              ing.supply_item_id,
-              ing.name,
-              ing.unit,
-              event.id,
-              ing.quantity,
-              ing.category_slug,
-            );
-          }
-        }
+      }
+      for (const row of extraIngredientRows) {
+        addToTotals(
+          ingredientTotals,
+          row.supplyItemId,
+          resolveLocalizedName(row.nameSnapshot, language),
+          row.unit,
+          event.id,
+          row.quantity,
+          row.categorySlug,
+        );
       }
 
       for (const row of savedUtensilRows) {
@@ -1482,6 +1661,7 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
           name: e.name,
           unit: e.unit,
           category_slug: e.category,
+          category_label: supplyCategoryLabelFor(categoryLabelMap, e.category),
           per_event: Object.fromEntries(
             [...e.perEvent.entries()].map(([eid, q]) => [eid, Math.round(q * 100) / 100]),
           ),
@@ -1506,6 +1686,7 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
         quantity: row.quantity,
         unit: row.unit,
         category_slug: row.categorySlug,
+        category_label: supplyCategoryLabelFor(categoryLabelMap, row.categorySlug),
       };
       if (row.supplyItem?.type === "UTENSIL") {
         bookingLevelUtensils.push(out);
@@ -1514,7 +1695,7 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
       }
     }
 
-    return successResponse(res, "OK", {
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
       events: eventsOut,
       totals: {
         ingredients: toRows(ingredientTotals),
@@ -1527,7 +1708,7 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
     });
   } catch (e) {
     console.error("getFullBookingPdfSupplyBreakdown:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1544,7 +1725,8 @@ function buildSuggestedSupplyEventMeta(event, menuItemCount, lineCount) {
 /**
  * GET /v1/bookings/:id/events/:eventId/suggestedSupplyFromMenu
  * Aggregates ingredient lines (with supply_item_id) from MenuItems referenced by the event snapshot,
- * scaled by ingredient qty × quantity_per_plate × guest_count (when guests > 0).
+ * scaled by (ingredient qty / 100) × quantity_per_plate × guest_count (when guests > 0) — ingredient
+ * qty is defined as the recipe amount needed for 100 guests.
  * Merges saved event ingredient lines when present.
  */
 async function getSuggestedEventSupplyFromMenu(req, res) {
@@ -1560,7 +1742,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       select: { id: true, status: true },
     });
     if (!booking) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     if (booking.status === "CANCELLED") {
       return errorResponse(
@@ -1582,14 +1764,14 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       },
     });
     if (!event) {
-      return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("bookingEvent.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
 
     const eventMetaBase = buildSuggestedSupplyEventMeta(event, 0, 0);
 
     const snap = event.eventSnapshot;
     if (snap == null || typeof snap !== "object") {
-      return successResponse(res, "OK", {
+      return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
         suggestions: [],
         legacy_without_supply: [],
         menu_items: [],
@@ -1672,7 +1854,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       manualOnly.sort((a, b) =>
         String(a.name || "").localeCompare(String(b.name || "")),
       );
-      return successResponse(res, "OK", {
+      return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
         suggestions: manualOnly,
         legacy_without_supply: [],
         menu_items: [],
@@ -1693,7 +1875,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       ),
     ];
     if (menuIds.length === 0) {
-      return successResponse(res, "OK", {
+      return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
         suggestions: [],
         legacy_without_supply: [],
         menu_items: [],
@@ -1761,7 +1943,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
         quantity_per_plate: item.quantity_per_plate,
         ingredients: [],
       }));
-      return successResponse(res, "OK", {
+      return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
         suggestions: [],
         legacy_without_supply: legacy,
         menu_items: emptyMenuItems,
@@ -1796,12 +1978,16 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       const templateQty = roundSupplyQty(total);
       const templateUnit = unit;
       const saved = savedAggBySupplyId.get(sid);
+      // Recipe-derived quantity is always recomputed from this event's current
+      // guest count — a saved value from before a guestCount change would
+      // otherwise silently stay stale (see menu.md's per-100-guests scaling
+      // convention). A saved row still wins its unit choice.
       suggestions.push({
         supply_item_id: src.id,
         name: resolveLocalizedName(src.name, language),
         template_quantity: templateQty,
         template_unit: templateUnit,
-        quantity: saved ? saved.quantity : templateQty,
+        quantity: templateQty,
         unit: saved?.unit || templateUnit,
         unit_options: supplyUnitOptionsForRow(src, templateUnit),
         category_slug: src.categorySlug,
@@ -1837,8 +2023,9 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       String(a.name || "").localeCompare(String(b.name || "")),
     );
 
+    // No upper cap here either — see the matching note in setEventSupplyItems.
     const clampSavedQty = (q) =>
-      Math.min(999, Math.max(0, Math.round((Number(q) || 0) * 100) / 100));
+      Math.max(0, Math.round((Number(q) || 0) * 100) / 100);
 
     const menu_items = [];
     for (const item of byMenuItem.values()) {
@@ -1859,7 +2046,15 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
           supplyItemMenuItemCount.get(rowEntry.supply_item_id) === 1
             ? eventLevel
             : null);
+        // A saved unit choice is still respected (unit doesn't change with
+        // guest count). But the QUANTITY is only taken from a saved row when
+        // the recipe itself has no base qty defined for this ingredient yet
+        // (rowEntry.quantity === 0) — that's the "caterer is setting it here
+        // for the first time" case. Whenever the recipe defines a base qty,
+        // it's always recomputed from the event's current guest count, so a
+        // save made before a later guestCount change can't go stale.
         const rowUnit = savedRow ? savedRow.unit : rowEntry.unit;
+        const hasRecipeQty = rowEntry.quantity > 0;
         ingredientsOut.push({
           supply_item_id: rowEntry.supply_item_id,
           name: resolveLocalizedName(src.name, language),
@@ -1868,14 +2063,10 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
           // picker offers the right choices instead of the generic catalog.
           unit_options: supplyUnitOptionsForRow(src, rowUnit),
           qty_per_plate: rowEntry.qty_per_plate,
-          // A saved value is an explicit user choice — keep it as-is, including
-          // 0. A recipe ingredient with no quantity defined starts at 0 too
-          // (the caterer sets it here for the first time), rather than the old
-          // filler default of 1.
-          quantity: savedRow
-            ? clampSavedQty(savedRow.quantity)
-            : rowEntry.quantity > 0
-              ? roundSupplyQty(rowEntry.quantity)
+          quantity: hasRecipeQty
+            ? roundSupplyQty(rowEntry.quantity)
+            : savedRow
+              ? clampSavedQty(savedRow.quantity)
               : 0,
           category_slug: src.categorySlug,
           cost: rowEntry.cost ?? null,
@@ -1910,7 +2101,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       });
     }
 
-    return successResponse(res, "OK", {
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
       suggestions,
       legacy_without_supply: legacy,
       menu_items,
@@ -1923,7 +2114,185 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
     });
   } catch (e) {
     console.error("getSuggestedEventSupplyFromMenu:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
+  }
+}
+
+function formatUnsavedEventTitleDate(d) {
+  const dt = d instanceof Date ? d : new Date(d);
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(dt);
+}
+
+/**
+ * Same identity idea as supplySavedListController.js's buildSavedListTitle
+ * (customer + date) but without a categories segment — this is a live/
+ * unsaved entry, not a persisted list, so there's no items table to derive
+ * category labels from without an extra query. No function-type segment
+ * either, since this represents the whole booking (possibly several events
+ * with different function types), not one specific event.
+ */
+function buildUnsavedBookingTitle({ customerName, eventAt }) {
+  const prefix = customerName && String(customerName).trim() ? String(customerName).trim() : "Booking";
+  const dateStr = eventAt ? formatUnsavedEventTitleDate(eventAt) : "";
+  return dateStr ? `${prefix} - ${dateStr}` : prefix;
+}
+
+/**
+ * GET /v1/supplyUnsavedEvents — confirmed bookings whose (upcoming) events
+ * already imply an ingredient supply list (menu-derived, or already have
+ * per-event supply rows set), but that were never explicitly saved as a
+ * SupplySavedList. One entry per booking, combining every one of its
+ * events' ingredients into a single total — same aggregation the Booking
+ * Supply List screen uses (one grocery run typically covers a whole
+ * multi-event booking), not one entry per event. Lets the main Supply
+ * Lists screen surface these without requiring the user to open the
+ * booking and manually save one — computed live every call, nothing
+ * persisted, so it's always in sync with the current menu.
+ */
+async function listUnsavedSupplyEvents(req, res) {
+  try {
+    const businessId = req.businessId;
+    const userId = req.user?.userId;
+    const language = getRequestedLanguage(req);
+
+    // Only confirmed orders (never DRAFT/quotation-stage or CANCELLED ones),
+    // and only events that haven't happened yet — a past or draft booking's
+    // ingredients aren't something the business still needs to shop for.
+    const now = new Date();
+    const bookings = await prisma.booking.findMany({
+      where: { businessId, status: "CONFIRMED" },
+      select: {
+        id: true,
+        customerName: true,
+        events: {
+          where: { eventAt: { gte: now } },
+          select: {
+            id: true,
+            eventSnapshot: true,
+            guestCount: true,
+            functionType: true,
+            eventAt: true,
+          },
+        },
+      },
+    });
+    const qualifyingBookings = bookings.filter((b) => b.events.length > 0);
+    if (qualifyingBookings.length === 0) {
+      return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), { events: [] });
+    }
+
+    const bookingIds = qualifyingBookings.map((b) => b.id);
+    const allEventIds = qualifyingBookings.flatMap((b) => b.events.map((e) => e.id));
+
+    const [savedLists, persistedRows] = await Promise.all([
+      prisma.supplySavedList.findMany({
+        where: { businessId, bookingId: { in: bookingIds } },
+        select: { bookingId: true },
+        distinct: ["bookingId"],
+      }),
+      // Saved lists are ingredient-only (see supplySavedListController.js),
+      // so only ingredient rows count toward "already has something to show".
+      prisma.bookingEventSupplyItem.findMany({
+        where: { bookingEventId: { in: allEventIds }, itemType: "INGREDIENT" },
+      }),
+    ]);
+    const savedBookingIds = new Set(savedLists.map((r) => r.bookingId).filter(Boolean));
+    const persistedByEvent = new Map();
+    for (const row of persistedRows) {
+      const list = persistedByEvent.get(row.bookingEventId) || [];
+      list.push(row);
+      persistedByEvent.set(row.bookingEventId, list);
+    }
+
+    const candidateBookings = qualifyingBookings.filter((b) => !savedBookingIds.has(b.id));
+    if (candidateBookings.length === 0) {
+      return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), { events: [] });
+    }
+
+    // Only events with no persisted rows yet need the (heavier) menu-derived
+    // check.
+    const menuCheckEvents = [];
+    for (const booking of candidateBookings) {
+      for (const event of booking.events) {
+        if (
+          !persistedByEvent.has(event.id) &&
+          Array.isArray(event.eventSnapshot?.menu_items) &&
+          event.eventSnapshot.menu_items.length > 0
+        ) {
+          menuCheckEvents.push(event);
+        }
+      }
+    }
+    const menuIdSet = new Set();
+    for (const event of menuCheckEvents) {
+      for (const row of event.eventSnapshot.menu_items) {
+        const id = String(row?.id ?? "").trim();
+        if (id) menuIdSet.add(id);
+      }
+    }
+    const menus = menuIdSet.size
+      ? await prisma.menuItem.findMany({ where: { id: { in: [...menuIdSet] } } })
+      : [];
+    const visibleMenus = menus.filter((m) =>
+      canViewMenuItemForSupply(m, businessId, userId),
+    );
+    const menuById = new Map(visibleMenus.map((m) => [m.id, m]));
+
+    const results = [];
+    for (const booking of candidateBookings) {
+      // Sum every event's ingredient quantities into one combined total per
+      // supply item, exactly like the Booking Supply List screen does.
+      const combined = new Map(); // supplyItemId\tunit -> qty
+      for (const event of booking.events) {
+        const persisted = persistedByEvent.get(event.id);
+        if (persisted && persisted.length > 0) {
+          for (const row of persisted) {
+            const key = `${row.supplyItemId}\t${row.unit}`;
+            combined.set(key, (combined.get(key) ?? 0) + (Number(row.quantity) || 0));
+          }
+        } else if (Array.isArray(event.eventSnapshot?.menu_items) && event.eventSnapshot.menu_items.length > 0) {
+          const guests = Math.max(0, Number(event.guestCount) || 0);
+          const guestMul = guests > 0 ? guests : 1;
+          const { buckets } = computeEventMenuIngredientData(
+            event.eventSnapshot.menu_items,
+            guestMul,
+            menuById,
+            language,
+          );
+          for (const [key, qty] of buckets.entries()) {
+            combined.set(key, (combined.get(key) ?? 0) + qty);
+          }
+        }
+      }
+      if (combined.size === 0) continue;
+
+      const soonestEventAt =
+        booking.events
+          .map((e) => e.eventAt)
+          .filter(Boolean)
+          .sort((a, b) => a - b)[0] ?? null;
+
+      results.push({
+        booking_id: booking.id,
+        title: buildUnsavedBookingTitle({
+          customerName: booking.customerName,
+          eventAt: soonestEventAt,
+        }),
+        item_count: combined.size,
+        event_at: soonestEventAt ? soonestEventAt.toISOString() : null,
+        event_count: booking.events.length,
+      });
+    }
+    results.sort((a, b) => String(b.event_at ?? "").localeCompare(String(a.event_at ?? "")));
+
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), { events: results });
+  } catch (e) {
+    console.error("listUnsavedSupplyEvents:", e);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1992,7 +2361,7 @@ async function createVendor(req, res) {
     return successResponse(res, "Vendor created", serializeVendor(row));
   } catch (e) {
     console.error("createVendor:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2019,10 +2388,10 @@ async function listVendors(req, res) {
           return hay.includes(q);
         })
       : rows;
-    return successResponse(res, "OK", { vendors: filtered.map(serializeVendor) });
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), { vendors: filtered.map(serializeVendor) });
   } catch (e) {
     console.error("listVendors:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2079,7 +2448,7 @@ async function updateVendor(req, res) {
     return successResponse(res, "Vendor updated", serializeVendor(row));
   } catch (e) {
     console.error("updateVendor:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2096,7 +2465,7 @@ async function deleteVendor(req, res) {
     return successResponse(res, "Vendor deleted", { id });
   } catch (e) {
     console.error("deleteVendor:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2296,7 +2665,7 @@ async function getUtensilsInventory(req, res) {
       }
     }
 
-    return successResponse(res, "OK", {
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
       summary: {
         total_items: items.length,
         total_units: totalUnits,
@@ -2308,7 +2677,7 @@ async function getUtensilsInventory(req, res) {
     });
   } catch (e) {
     console.error("getUtensilsInventory:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2339,17 +2708,17 @@ async function getUtensilInventoryDetail(req, res) {
       language,
     );
 
-    return successResponse(res, "OK", { item });
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), { item });
   } catch (e) {
     console.error("getUtensilInventoryDetail:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
 /**
  * POST /v1/generateSupplyListPdf
  * Body: { document_label, heading, subtitle?, company_name?, company_address?,
- *   company_owner_name?, company_phone?, company_email?, company_gst?,
+ *   company_owners?, company_phone?, company_email?, company_gst?,
  *   table_labels: { item, qty, unit }, groups: [{ title, lines: [{ name, quantity, unit }] }] }
  * Returns: application/pdf
  */
@@ -2371,7 +2740,7 @@ async function generateSupplyListPdf(req, res) {
       subtitle: body.subtitle,
       companyName: body.company_name,
       companyAddress: body.company_address,
-      companyOwnerName: body.company_owner_name,
+      companyOwners: body.company_owners,
       companyPhone: body.company_phone,
       companyEmail: body.company_email,
       companyGst: body.company_gst,
@@ -2415,6 +2784,9 @@ module.exports = {
   getEventSupplySummary,
   getBookingEventsSupplySummaries,
   getSuggestedEventSupplyFromMenu,
+  listUnsavedSupplyEvents,
+  computeEventMenuIngredientData,
+  canViewMenuItemForSupply,
   getFullBookingPdfSupplyBreakdown,
   createVendor,
   listVendors,

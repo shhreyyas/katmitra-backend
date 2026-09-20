@@ -5,6 +5,11 @@ const {
   normalizeLocalizedName,
   resolveLocalizedName,
 } = require("../utils/localization");
+const {
+  computeEventMenuIngredientData,
+  canViewMenuItemForSupply,
+} = require("./supplyController");
+const { resolveFunctionTypeLabel } = require("../utils/functionTypeLabels");
 
 const VALID_TYPES_FILTER = { type: "INGREDIENT" };
 
@@ -36,27 +41,20 @@ function formatTitleDate(d) {
 }
 
 /**
+ * Title is deliberately just "<customer name> - <date>" — no categories, no
+ * function type. Function type is surfaced as its own `function_type` field
+ * on the response instead (see formatSavedListSummary/Detail), same split
+ * buildUnsavedBookingTitle in supplyController.js uses for the live/unsaved
+ * equivalent of this list.
  * @param {object} opts
  * @param {{ customerName?: string|null }|null} opts.booking
- * @param {{ functionType?: string|null }|null} opts.bookingEvent
- * @param {string[]} opts.categoryLabels resolved display labels (sorted unique)
  * @param {Date} [opts.at]
  */
-function buildSavedListTitle({ booking, bookingEvent, categoryLabels, at }) {
+function buildSavedListTitle({ booking, at }) {
   const now = at ?? new Date();
   const dateStr = formatTitleDate(now);
-  const cats =
-    categoryLabels.length === 1
-      ? categoryLabels[0]
-      : categoryLabels.join(", ");
-  if (booking && bookingEvent) {
-    const parts = [booking.customerName, bookingEvent.functionType].filter(
-      (x) => x != null && String(x).trim() !== "",
-    );
-    const prefix = parts.length ? parts.join(" ").trim() : "Event";
-    return `${prefix} - ${cats} - ${dateStr}`;
-  }
-  return `${cats} - ${dateStr}`;
+  const customerName = booking?.customerName ? String(booking.customerName).trim() : "";
+  return customerName ? `${customerName} - ${dateStr}` : dateStr;
 }
 
 function serializeSavedItem(row, lang) {
@@ -75,6 +73,183 @@ function normalizeCustomTitle(raw) {
   const value = String(raw ?? "").trim();
   if (!value) return null;
   return value.slice(0, 512);
+}
+
+/**
+ * Resolves a set of {supply_item_id, quantity, unit} lines into a real,
+ * persisted SupplySavedList (mirrors createSupplySavedList's resolution
+ * logic, minus the request/response plumbing). Returns null if none of the
+ * lines resolve to a visible, active INGREDIENT supply item.
+ */
+async function persistAutoSupplyList({
+  businessId,
+  userId,
+  language,
+  bookingEventId = null,
+  bookingId = null,
+  booking,
+  lines,
+}) {
+  const ids = [...new Set(lines.map((l) => l.supply_item_id).filter(Boolean))];
+  if (ids.length === 0) return null;
+
+  const supplyRows = await prisma.supplyItem.findMany({
+    where: {
+      id: { in: ids },
+      isActive: true,
+      ...VALID_TYPES_FILTER,
+      OR: supplyVisibilityOrBranches(businessId, userId),
+    },
+    include: { category: true },
+  });
+  const byId = new Map(supplyRows.map((row) => [row.id, row]));
+  const validLines = lines.filter((l) => byId.has(l.supply_item_id));
+  if (validLines.length === 0) return null;
+
+  const categorySlugsSet = new Set();
+  for (const line of validLines) {
+    categorySlugsSet.add(byId.get(line.supply_item_id).categorySlug);
+  }
+  const catRows = await prisma.supplyItemCategory.findMany({
+    where: { slug: { in: [...categorySlugsSet] }, isActive: true },
+  });
+  const catBySlug = new Map(catRows.map((c) => [c.slug, c]));
+  const categoryLabels = [...categorySlugsSet]
+    .sort()
+    .map((slug) =>
+      catBySlug.has(slug) ? resolveLocalizedName(catBySlug.get(slug).name, language) : slug,
+    );
+  const categoriesLabel = categoryLabels.length <= 1 ? categoryLabels[0] ?? "" : categoryLabels.join(", ");
+
+  const title = buildSavedListTitle({ booking, at: new Date() });
+
+  return prisma.supplySavedList.create({
+    data: {
+      businessId,
+      createdByUserId: userId ?? null,
+      title,
+      bookingEventId,
+      bookingId,
+      categoriesLabel,
+      items: {
+        create: validLines.map((line) => {
+          const source = byId.get(line.supply_item_id);
+          const qty = Math.max(1, Math.min(999, Math.round(Number(line.quantity)) || 1));
+          return {
+            supplyItemId: source.id,
+            quantity: qty,
+            unit: String(line.unit || source.defaultUnit || "kg"),
+            categorySlug: source.categorySlug,
+            nameSnapshot: source.name,
+          };
+        }),
+      },
+    },
+  });
+}
+
+/**
+ * Called right after a booking is confirmed (bookingController.js's
+ * confirmBooking) — auto-saves ONE combined supply list for the whole
+ * booking (summing every event's ingredients together, same "one grocery
+ * run covers the booking" aggregation the Booking Supply List screen
+ * already uses via getFullBookingPdfSupplyBreakdown), so it shows up on the
+ * main Supply Lists screen without a manual save step. A booking with
+ * multiple events gets a single list, not one per event. Prefers each
+ * event's already-set per-event rows (the caterer's own reviewed
+ * quantities) over the raw menu-derived recipe. Best-effort — failures here
+ * must never fail booking confirmation.
+ */
+async function autoSaveSupplyListsForConfirmedBooking({ businessId, userId, language, booking }) {
+  const events = Array.isArray(booking?.events) ? booking.events : [];
+  if (events.length === 0) return;
+
+  const existing = await prisma.supplySavedList.findFirst({
+    where: { businessId, bookingId: booking.id },
+    select: { id: true },
+  });
+  if (existing) return;
+
+  const eventIds = events.map((e) => e.id);
+  const persistedRows = await prisma.bookingEventSupplyItem.findMany({
+    where: { bookingEventId: { in: eventIds }, itemType: "INGREDIENT" },
+  });
+  const persistedByEvent = new Map();
+  for (const row of persistedRows) {
+    const list = persistedByEvent.get(row.bookingEventId) || [];
+    list.push(row);
+    persistedByEvent.set(row.bookingEventId, list);
+  }
+
+  const menuNeededEvents = events.filter(
+    (e) =>
+      !persistedByEvent.has(e.id) &&
+      Array.isArray(e.eventSnapshot?.menu_items) &&
+      e.eventSnapshot.menu_items.length > 0,
+  );
+  const menuIdSet = new Set();
+  for (const e of menuNeededEvents) {
+    for (const row of e.eventSnapshot.menu_items) {
+      const id = String(row?.id ?? "").trim();
+      if (id) menuIdSet.add(id);
+    }
+  }
+  const menus = menuIdSet.size
+    ? await prisma.menuItem.findMany({ where: { id: { in: [...menuIdSet] } } })
+    : [];
+  const visibleMenus = menus.filter((m) => canViewMenuItemForSupply(m, businessId, userId));
+  const menuById = new Map(visibleMenus.map((m) => [m.id, m]));
+
+  // supplyItemId -> { quantity, unit } — summed across every event.
+  const combined = new Map();
+  const addToCombined = (supplyItemId, quantity, unit) => {
+    const prev = combined.get(supplyItemId);
+    combined.set(supplyItemId, { quantity: (prev?.quantity ?? 0) + quantity, unit: prev?.unit ?? unit });
+  };
+  for (const event of events) {
+    const persisted = persistedByEvent.get(event.id);
+    if (persisted && persisted.length > 0) {
+      for (const row of persisted) {
+        addToCombined(row.supplyItemId, Number(row.quantity) || 0, row.unit);
+      }
+    } else if (Array.isArray(event.eventSnapshot?.menu_items) && event.eventSnapshot.menu_items.length > 0) {
+      const guests = Math.max(0, Number(event.guestCount) || 0);
+      const guestMul = guests > 0 ? guests : 1;
+      const { buckets } = computeEventMenuIngredientData(
+        event.eventSnapshot.menu_items,
+        guestMul,
+        menuById,
+        language,
+      );
+      for (const [key, qty] of buckets.entries()) {
+        const [supplyItemId, unit] = key.split("\t");
+        addToCombined(supplyItemId, qty, unit);
+      }
+    }
+  }
+  if (combined.size === 0) return;
+
+  const lines = [...combined.entries()].map(([supply_item_id, v]) => ({
+    supply_item_id,
+    quantity: v.quantity,
+    unit: v.unit,
+  }));
+
+  try {
+    await persistAutoSupplyList({
+      businessId,
+      userId,
+      language,
+      bookingId: booking.id,
+      booking: { customerName: booking.customerName },
+      lines,
+    });
+  } catch (err) {
+    console.warn(
+      `autoSaveSupplyListsForConfirmedBooking: failed for booking ${booking.id}:`,
+      err.message,
+    );
+  }
 }
 
 async function createSupplySavedList(req, res) {
@@ -206,6 +381,8 @@ async function createSupplySavedList(req, res) {
       where: { id: list.id, businessId },
       include: {
         items: { orderBy: { createdAt: "asc" } },
+        bookingEvent: { select: { functionType: true } },
+        booking: { select: { functionType: true } },
       },
     });
 
@@ -218,13 +395,27 @@ async function createSupplySavedList(req, res) {
   }
 }
 
+/**
+ * Event-scoped lists take the function type straight off their event; a
+ * booking-level combined list (no specific event) falls back to the
+ * booking's own functionType, which is kept in sync with the booking's
+ * first event at creation time (see bookingController.js) — good enough as
+ * a representative value even though the booking may span several events.
+ */
+function resolveSavedListFunctionType(row, lang) {
+  const slug = row.bookingEvent?.functionType ?? row.booking?.functionType ?? null;
+  return resolveFunctionTypeLabel(slug, lang);
+}
+
 function formatSavedListSummary(row, lang) {
   return {
     id: row.id,
     title: row.title,
     booking_event_id: row.bookingEventId ?? null,
+    booking_id: row.bookingId ?? null,
     item_count: row._count?.items ?? row.items?.length ?? 0,
     categories_label: row.categoriesLabel ?? null,
+    function_type: resolveSavedListFunctionType(row, lang),
     created_at: row.createdAt?.toISOString?.() ?? row.createdAt,
     updated_at: row.updatedAt?.toISOString?.() ?? row.updatedAt,
   };
@@ -237,6 +428,7 @@ function formatSavedListDetail(row, lang) {
     title: row.title,
     booking_event_id: row.bookingEventId ?? null,
     categories_label: row.categoriesLabel ?? null,
+    function_type: resolveSavedListFunctionType(row, lang),
     created_at: row.createdAt?.toISOString?.() ?? row.createdAt,
     updated_at: row.updatedAt?.toISOString?.() ?? row.updatedAt,
     items: (row.items || []).map((it) => serializeSavedItem(it, lang)),
@@ -260,9 +452,22 @@ async function listSupplySavedLists(req, res) {
     const bookingEventIdFilter = String(
       req.query.booking_event_id ?? "",
     ).trim();
+    const search = String(req.query.search ?? "").trim();
+    const source = String(req.query.source ?? "all").trim().toLowerCase();
+
     const where = { businessId };
     if (bookingEventIdFilter) {
       where.bookingEventId = bookingEventIdFilter;
+    }
+    if (search) {
+      where.title = { contains: search, mode: "insensitive" };
+    }
+    // "order" = auto-saved from a confirmed booking (bookingId set); "normal"
+    // = everything else (manually created lists, event-scoped lists).
+    if (source === "order") {
+      where.bookingId = { not: null };
+    } else if (source === "normal") {
+      where.bookingId = null;
     }
 
     const [total, rows] = await prisma.$transaction([
@@ -276,10 +481,13 @@ async function listSupplySavedLists(req, res) {
           id: true,
           title: true,
           bookingEventId: true,
+          bookingId: true,
           categoriesLabel: true,
           createdAt: true,
           updatedAt: true,
           _count: { select: { items: true } },
+          bookingEvent: { select: { functionType: true } },
+          booking: { select: { functionType: true } },
         },
       }),
     ]);
@@ -314,6 +522,8 @@ async function getSupplySavedList(req, res) {
       where: { id, businessId },
       include: {
         items: { orderBy: { createdAt: "asc" } },
+        bookingEvent: { select: { functionType: true } },
+        booking: { select: { functionType: true } },
       },
     });
     if (!row) {
@@ -454,6 +664,8 @@ async function updateSupplySavedList(req, res) {
       where: { id, businessId },
       include: {
         items: { orderBy: { createdAt: "asc" } },
+        bookingEvent: { select: { functionType: true } },
+        booking: { select: { functionType: true } },
       },
     });
 
@@ -662,4 +874,5 @@ module.exports = {
   updateSupplySavedList,
   assignSupplySavedListToBookingEvent,
   deleteSupplySavedList,
+  autoSaveSupplyListsForConfirmedBooking,
 };

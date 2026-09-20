@@ -3,6 +3,12 @@ const { Prisma } = require("@prisma/client");
 const { successResponse, errorResponse } = require("../utils/response");
 const { sendBookingConfirmationEmail } = require("../utils/email");
 const { getRequestedLanguage, resolveLocalizedName } = require("../utils/localization");
+const { normalizeKitchenType } = require("../utils/kitchenType");
+const { sortEventsByMealTime } = require("../utils/eventOrder");
+const { apiMessage } = require("../utils/apiMessages");
+const {
+  autoSaveSupplyListsForConfirmedBooking,
+} = require("./supplySavedListController");
 
 function deriveIsGlobal(businessId, createdByUserId) {
   if (businessId == null || businessId === "") return true;
@@ -165,6 +171,7 @@ const CONFIRMED_LIMITED_PATCH_TOP = new Set([
   "event_at",
   "event_location",
   "function_type",
+  "kitchen_type",
   "guest_count",
   "notes",
   "events",
@@ -224,6 +231,7 @@ function isConfirmedLimitedPatch(body) {
     body.event_at !== undefined ||
     body.event_location !== undefined ||
     body.function_type !== undefined ||
+    body.kitchen_type !== undefined ||
     body.guest_count !== undefined ||
     body.notes !== undefined ||
     (Array.isArray(body.events) && body.events.length > 0)
@@ -441,6 +449,11 @@ function serializeBooking(b, { includePayments = true } = {}) {
       effective_event_location: resolveEventLoc(row.event_location),
     };
   });
+  // Natural meal-time order (breakfast -> lunch -> dinner per day) rather
+  // than whatever order the caterer happened to add/save the events in —
+  // the query itself only orders by eventAt/createdAt, which doesn't
+  // guarantee same-day events land in meal order.
+  serializedEvents = sortEventsByMealTime(serializedEvents);
   const hasEvents = serializedEvents.length > 0;
   const bookingAtIso = b.eventAt?.toISOString?.() ?? b.eventAt ?? null;
 
@@ -466,6 +479,7 @@ function serializeBooking(b, { includePayments = true } = {}) {
     firstEvent?.effective_event_location ?? customerAddress ?? null;
   const rootGuests = firstEvent?.guest_count ?? b.guestCount ?? null;
   const rootFn = b.functionType ?? null;
+  const rootKitchen = b.kitchenType ?? null;
 
   const extraServiceLines = (b.extraServiceLines || []).map((line) => ({
     id: line.id,
@@ -495,6 +509,7 @@ function serializeBooking(b, { includePayments = true } = {}) {
     event_at: rootAt,
     event_location: rootLoc,
     function_type: rootFn,
+    kitchen_type: rootKitchen,
     guest_count: rootGuests,
     ...(!hasEvents ? { notes: b.notes } : {}),
     discount_amount: num(b.discountAmount),
@@ -643,6 +658,12 @@ async function createBooking(req, res) {
 
     const firstEvent =
       Array.isArray(body.events) && body.events.length > 0 ? body.events[0] : null;
+
+    const kitchenType = normalizeKitchenType(body.kitchen_type);
+    if (kitchenType === undefined) {
+      return errorResponse(res, "Invalid kitchen type", 200, "VALIDATION_ERROR");
+    }
+
     const sc = num(body.service_charge_pct ?? business.defaultServiceChargePct);
     const txp = num(body.tax_pct ?? business.defaultTaxPct);
     const pricing = computePricingFromSnapshots(
@@ -676,6 +697,7 @@ async function createBooking(req, res) {
             : null,
         eventLocation: firstEvent?.event_location ?? body.event_location ?? null,
         functionType: firstEvent?.function_type ?? body.function_type ?? null,
+        kitchenType,
         guestCount:
           firstEvent?.guest_count != null
             ? parseInt(firstEvent.guest_count, 10)
@@ -723,7 +745,7 @@ async function createBooking(req, res) {
     return successResponse(res, "Draft created", serializeBooking(withMenu));
   } catch (e) {
     console.error("createBooking:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -742,7 +764,7 @@ async function patchBooking(req, res) {
       includePayments: false,
     });
     if (!existing) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     if (existing.status === "CANCELLED") {
       return errorResponse(res, "Cancelled booking cannot be updated", 200, "VALIDATION_ERROR");
@@ -775,6 +797,10 @@ async function patchBooking(req, res) {
     const nextFunctionType = firstEvent?.function_type ?? body.function_type;
     const nextGuestCount = firstEvent?.guest_count ?? body.guest_count;
     const nextNotes = firstEvent?.notes ?? body.notes;
+    const nextKitchenType = normalizeKitchenType(body.kitchen_type);
+    if (body.kitchen_type !== undefined && nextKitchenType === undefined) {
+      return errorResponse(res, "Invalid kitchen type", 200, "VALIDATION_ERROR");
+    }
 
     const confirmedLimitedPatch = !isDraft && isConfirmedLimitedPatch(body);
     const eventAtForCutoff = primaryEventAtFromRow(existing);
@@ -787,6 +813,7 @@ async function patchBooking(req, res) {
         body.event_at !== undefined ||
         body.event_location !== undefined ||
         body.function_type !== undefined ||
+        body.kitchen_type !== undefined ||
         body.guest_count !== undefined ||
         body.notes !== undefined;
 
@@ -929,7 +956,7 @@ async function patchBooking(req, res) {
         }
         const exists = (existing.events || []).find((row) => row.id === ev.id);
         if (!exists) {
-          return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+          return errorResponse(res, apiMessage("bookingEvent.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
         }
         const cutoffAt = exists.eventAt ?? eventAtForCutoff;
         if (!canEditBeforeEventCutoff(cutoffAt)) {
@@ -1211,6 +1238,7 @@ async function patchBooking(req, res) {
         nextEventAt !== undefined ? (nextEventAt ? new Date(nextEventAt) : null) : existing.eventAt,
       eventLocation: nextEventLocation !== undefined ? nextEventLocation : existing.eventLocation,
       functionType: nextFunctionType !== undefined ? nextFunctionType : existing.functionType,
+      kitchenType: body.kitchen_type !== undefined ? nextKitchenType : existing.kitchenType,
       guestCount: nextGuestCount != null ? parseInt(nextGuestCount, 10) : existing.guestCount,
       notes: nextNotes !== undefined ? nextNotes : existing.notes,
       discountAmount: new Prisma.Decimal(String(discount)),
@@ -1249,7 +1277,7 @@ async function patchBooking(req, res) {
     );
   } catch (e) {
     console.error("patchBooking:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1267,7 +1295,7 @@ async function updateEvent(req, res) {
       includePayments: true,
     });
     if (!existing) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     if (existing.status === "CANCELLED") {
       return errorResponse(res, "Cancelled booking cannot be updated", 200, "VALIDATION_ERROR");
@@ -1296,7 +1324,7 @@ async function updateEvent(req, res) {
 
     const current = (existing.events || []).find((ev) => ev.id === eventId);
     if (!current) {
-      return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("bookingEvent.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     // if (!canEditBeforeEventCutoff(current.eventAt)) {
     //   return errorResponse(
@@ -1350,7 +1378,7 @@ async function updateEvent(req, res) {
     return successResponse(res, "Event updated", serializeBooking(updated));
   } catch (e) {
     console.error("updateEvent:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1384,7 +1412,7 @@ async function replaceEventMenuItem(req, res) {
       where: { id: bookingId, businessId },
       select: { id: true, status: true },
     });
-    if (!booking) return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+    if (!booking) return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     if (booking.status === "CANCELLED") {
       return errorResponse(
         res,
@@ -1398,7 +1426,7 @@ async function replaceEventMenuItem(req, res) {
       where: { id: eventId, bookingId },
       select: { id: true, eventSnapshot: true },
     });
-    if (!event) return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+    if (!event) return errorResponse(res, apiMessage("bookingEvent.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
 
     const snapshot = event.eventSnapshot;
     const menuItems = Array.isArray(snapshot?.menu_items) ? snapshot.menu_items : [];
@@ -1427,7 +1455,7 @@ async function replaceEventMenuItem(req, res) {
     return successResponse(res, "Event menu item replaced", { updated: true });
   } catch (e) {
     console.error("replaceEventMenuItem:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1444,7 +1472,7 @@ async function createEvent(req, res) {
       includePayments: true,
     });
     if (!existing) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     if (existing.status === "CANCELLED") {
       return errorResponse(res, "Cancelled booking cannot be updated", 200, "VALIDATION_ERROR");
@@ -1512,7 +1540,7 @@ async function createEvent(req, res) {
     return successResponse(res, "Event created", serializeBooking(updated));
   } catch (e) {
     console.error("createEvent:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1529,12 +1557,18 @@ async function deleteEvent(req, res) {
       includePayments: true,
     });
     if (!existing) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     if (existing.status === "CANCELLED") {
       return errorResponse(res, "Cancelled booking cannot be updated", 200, "VALIDATION_ERROR");
     }
-    if (existing.status !== "DRAFT") {
+    // A completed order's events may also be deleted (per the Completed Orders
+    // restructure) — the 12h-before-event cutoff below is skipped for these too,
+    // since a completed order's events are already in the past. A plain
+    // CONFIRMED-but-not-completed booking stays locked; that guard is for
+    // mid-flight event edits and is unrelated to the completed-order case.
+    const isCompletedOrder = Boolean(existing.completedAt);
+    if (existing.status !== "DRAFT" && !isCompletedOrder) {
       return errorResponse(
         res,
         "Confirmed booking is locked for event/menu updates.",
@@ -1546,7 +1580,7 @@ async function deleteEvent(req, res) {
     const currentEvents = existing.events || [];
     const target = currentEvents.find((ev) => ev.id === eventId);
     if (!target) {
-      return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("bookingEvent.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     if (currentEvents.length <= 1) {
       return errorResponse(
@@ -1556,7 +1590,7 @@ async function deleteEvent(req, res) {
         "VALIDATION_ERROR",
       );
     }
-    if (!canEditBeforeEventCutoff(target.eventAt, existing.status)) {
+    if (!isCompletedOrder && !canEditBeforeEventCutoff(target.eventAt, existing.status)) {
       return errorResponse(
         res,
         "Event can only be deleted more than 12 hours before the event time.",
@@ -1573,7 +1607,7 @@ async function deleteEvent(req, res) {
     return successResponse(res, "Event deleted", serializeBooking(updated));
   } catch (e) {
     console.error("deleteEvent:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1600,7 +1634,7 @@ async function getBookingEvent(req, res) {
       },
     });
     if (!row) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
 
     const enrichedRow = skipImageEnrich
@@ -1610,7 +1644,7 @@ async function getBookingEvent(req, res) {
     const events = enrichedRow.events || [];
     const target = events.find((ev) => ev.id === eventId);
     if (!target) {
-      return errorResponse(res, "Event not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("bookingEvent.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
 
     const customerAddress = row.customerAddress ?? row.eventLocation ?? null;
@@ -1689,14 +1723,15 @@ async function getBookingEvent(req, res) {
           row.eventRangeStart?.toISOString?.() ?? row.eventRangeStart ?? null,
         event_range_end:
           row.eventRangeEnd?.toISOString?.() ?? row.eventRangeEnd ?? null,
+        kitchen_type: row.kitchenType ?? null,
         updated_at: row.updatedAt?.toISOString?.() ?? row.updatedAt,
       },
     };
 
-    return successResponse(res, "OK", payload);
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), payload);
   } catch (e) {
     console.error("getBookingEvent:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1803,10 +1838,10 @@ async function getDashboard(req, res) {
         .map(({ b }) => serializeBooking(b)),
     };
 
-    return successResponse(res, "OK", payload);
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), payload);
   } catch (e) {
     console.error("getDashboard:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -1824,7 +1859,7 @@ async function searchBookingCustomers(req, res) {
       .slice(0, 80);
 
     if (q.length < 3) {
-      return successResponse(res, "OK", { customers: [] });
+      return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), { customers: [] });
     }
 
     const take = queryNumberParam(req.query.limit, 10, { min: 1, max: 15 });
@@ -1875,10 +1910,10 @@ async function searchBookingCustomers(req, res) {
       if (customers.length >= take) break;
     }
 
-    return successResponse(res, "OK", { customers });
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), { customers });
   } catch (e) {
     console.error("searchBookingCustomers:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2040,7 +2075,7 @@ async function listBookings(req, res) {
 
     const has_more = skip + rows.length < total;
 
-    return successResponse(res, "OK", {
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
       bookings: rows.map((b) => (isLite ? serializeBookingListRow(b) : serializeBooking(b))),
       total,
       limit: take,
@@ -2049,7 +2084,7 @@ async function listBookings(req, res) {
     });
   } catch (e) {
     console.error("listBookings:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2104,7 +2139,7 @@ async function listPayments(req, res) {
 
     const has_more = skip + rows.length < total;
 
-    return successResponse(res, "OK", {
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
       payments: rows.map((p) => ({
         ...serializePaymentTransaction(p),
         booking: {
@@ -2121,7 +2156,7 @@ async function listPayments(req, res) {
     });
   } catch (e) {
     console.error("listPayments:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2149,7 +2184,7 @@ async function getBooking(req, res) {
       },
     });
     if (!row) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     const enrichedRow = skipImageEnrich
       ? row
@@ -2161,7 +2196,7 @@ async function getBooking(req, res) {
     );
   } catch (e) {
     console.error("getBooking:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2177,7 +2212,7 @@ async function completeBookingOrder(req, res) {
       includePayments: true,
     });
     if (!row) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     if (row.completedAt) {
       const enriched = await enrichEventSnapshotMenuImages(row);
@@ -2222,7 +2257,7 @@ async function completeBookingOrder(req, res) {
     return successResponse(res, "Order completed", serializeBooking(enriched));
   } catch (e) {
     console.error("completeBookingOrder:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2250,75 +2285,48 @@ async function deleteBooking(req, res) {
       },
     });
     if (!existing) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
-    }
-    if (existing.completedAt) {
-      return errorResponse(
-        res,
-        "Completed orders cannot be deleted",
-        200,
-        "VALIDATION_ERROR",
-      );
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
 
+    // Completed orders are deletable too (Completed Orders restructure) — this
+    // used to be blocked ("protected accounting record"); that protection was
+    // deliberately relaxed on request. `bookingMenuItem`/`paymentTransaction`/
+    // events and their children all cascade at the DB level (see
+    // prisma/schema.prisma), so a single `booking` delete is sufficient — no
+    // manual per-table cleanup needed.
     const wasDraft = existing.status === "DRAFT";
+    const wasCompleted = Boolean(existing.completedAt);
     const userId = req.user?.userId ?? null;
 
-    try {
-      await prisma.$transaction(async (tx) => {
-        /**
-         * `deleteMany` with `completedAt: null` re-checks the completed-lockout
-         * inside the transaction — closes the race where a concurrent
-         * completeBookingOrder call sets `completedAt` between our lookup above
-         * and this delete. `count === 0` means that race happened (or the
-         * booking was already deleted) and aborts the transaction.
-         * `bookingMenuItem`/`paymentTransaction`/events and their children all
-         * cascade at the DB level (see prisma/schema.prisma), so a single
-         * `booking` delete is sufficient — no manual per-table cleanup needed.
-         */
-        const deleted = await tx.booking.deleteMany({
-          where: { id: bookingId, completedAt: null },
-        });
-        if (deleted.count === 0) {
-          throw new Error("BOOKING_COMPLETED_RACE");
-        }
-        if (!wasDraft) {
-          // Written in the same transaction as the delete (not the fire-and-forget
-          // logActivity helper) so a failed audit write rolls back the deletion
-          // instead of silently losing the only record that this money existed.
-          await tx.activityLog.create({
-            data: {
-              type: "booking_deleted",
-              message: `Order deleted: ${existing.customerName || existing.customerPhone || bookingId} (status was ${existing.status}, amount paid ${existing.amountPaid})`,
-              actorUserId: userId,
-              meta: {
-                bookingId,
-                businessId,
-                status: existing.status,
-                amountPaid: existing.amountPaid,
-              },
+    await prisma.$transaction(async (tx) => {
+      await tx.booking.delete({ where: { id: bookingId } });
+      if (!wasDraft) {
+        // Written in the same transaction as the delete (not the fire-and-forget
+        // logActivity helper) so a failed audit write rolls back the deletion
+        // instead of silently losing the only record that this money existed.
+        await tx.activityLog.create({
+          data: {
+            type: "booking_deleted",
+            message: `Order deleted: ${existing.customerName || existing.customerPhone || bookingId} (status was ${existing.status}${wasCompleted ? ", completed" : ""}, amount paid ${existing.amountPaid})`,
+            actorUserId: userId,
+            meta: {
+              bookingId,
+              businessId,
+              status: existing.status,
+              wasCompleted,
+              amountPaid: existing.amountPaid,
             },
-          });
-        }
-      });
-    } catch (e) {
-      if (e.message === "BOOKING_COMPLETED_RACE") {
-        return errorResponse(
-          res,
-          "Completed orders cannot be deleted",
-          200,
-          "VALIDATION_ERROR",
-        );
+          },
+        });
       }
-      throw e;
-    }
+    });
 
     return successResponse(res, wasDraft ? "Draft deleted" : "Order deleted", {
       id: bookingId,
     });
   } catch (e) {
     console.error("deleteBooking:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2334,7 +2342,7 @@ async function cancelBooking(req, res) {
       includePayments: true,
     });
     if (!existing) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     if (existing.status === "CANCELLED") {
       return errorResponse(res, "Booking is already cancelled", 200, "VALIDATION_ERROR");
@@ -2369,7 +2377,7 @@ async function cancelBooking(req, res) {
     return successResponse(res, "Booking cancelled", serializeBooking(enriched));
   } catch (e) {
     console.error("cancelBooking:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2389,7 +2397,7 @@ async function confirmBooking(req, res) {
       },
     });
     if (!existing) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     if (existing.status !== "DRAFT") {
       return errorResponse(res, "Booking is not a draft", 200, "VALIDATION_ERROR");
@@ -2452,10 +2460,25 @@ async function confirmBooking(req, res) {
       }
     }
 
+    // Best-effort: auto-save a supply list per event that doesn't have one
+    // yet, so confirming a booking is enough for it to show up on the main
+    // Supply Lists screen without a separate manual "save as list" step.
+    // Never fails booking confirmation itself.
+    try {
+      await autoSaveSupplyListsForConfirmedBooking({
+        businessId,
+        userId: req.user?.userId,
+        language: getRequestedLanguage(req),
+        booking: result,
+      });
+    } catch (autoSaveErr) {
+      console.warn("confirmBooking autoSaveSupplyLists:", autoSaveErr.message);
+    }
+
     return successResponse(res, "Booking confirmed", serializeBooking(result));
   } catch (e) {
     console.error("confirmBooking:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2485,7 +2508,7 @@ async function recordPayment(req, res) {
       },
     });
     if (!existing) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     if (existing.status !== "CONFIRMED") {
       return errorResponse(res, "Payments only for confirmed bookings", 200, "VALIDATION_ERROR");
@@ -2532,7 +2555,7 @@ async function recordPayment(req, res) {
     return successResponse(res, "Payment recorded", serializeBooking(updated));
   } catch (e) {
     console.error("recordPayment:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2549,13 +2572,13 @@ async function triggerBookingPdfJobs(req, res) {
       select: { id: true },
     });
     if (!existing) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     // Current implementation intentionally returns accepted trigger response.
     return successResponse(res, "PDF jobs triggered", { ok: true });
   } catch (e) {
     console.error("triggerBookingPdfJobs:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 
@@ -2573,12 +2596,12 @@ async function retryBookingPdfJob(req, res) {
       select: { id: true },
     });
     if (!existing) {
-      return errorResponse(res, "Booking not found", 404, "NOT_FOUND");
+      return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
     }
     return successResponse(res, "PDF job retry queued", { ok: true, job_id: jobId ?? null });
   } catch (e) {
     console.error("retryBookingPdfJob:", e);
-    return errorResponse(res, "Server error", 500, "SERVER_ERROR", e.message);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
 }
 

@@ -39,13 +39,26 @@ function formatBusinessDetail(business) {
   const service_types = (business.serviceLinks || []).map(
     (l) => l.serviceType.slug,
   );
+  const owners = [...(business.owners || [])]
+    .sort((a, b) => (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0) || a.sortOrder - b.sortOrder)
+    .map((o) => ({
+      id: o.id,
+      name: o.name,
+      phone: o.phone,
+      is_primary: o.isPrimary,
+    }));
+  const primaryOwner = owners.find((o) => o.is_primary) ?? owners[0] ?? null;
   return {
     id: business.id,
     business_logo: business.logoUrl,
     business_name: business.name,
-    business_owner_name: business.ownerName,
+    // Mirrors the primary BusinessOwner (source of truth going forward) so this legacy
+    // field stays accurate even after an owners-only edit that never touches the
+    // legacy `ownerName` column; falls back to that column only when no owners exist.
+    business_owner_name: primaryOwner?.name ?? business.ownerName,
     same_as_owner_number: business.sameAsOwnerNumber,
     contact_number: business.contactNumber,
+    owners,
     business_email: business.email ?? "",
     business_address: business.address,
     service_types,
@@ -72,6 +85,7 @@ async function loadBusinessDetailsArray(businessId) {
     where: { id: businessId },
     include: {
       serviceLinks: { include: { serviceType: true } },
+      owners: { orderBy: [{ isPrimary: "desc" }, { sortOrder: "asc" }] },
     },
   });
   if (!business) return [];

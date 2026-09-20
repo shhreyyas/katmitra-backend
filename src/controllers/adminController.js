@@ -80,7 +80,10 @@ exports.listMenuCategories = async (req, res) => {
     const requestedLanguage = getRequestedLanguage(req);
     const status = String(req.query.status || "all").toLowerCase();
 
-    const where = {};
+    // Business-private categories (see categoryController.js's
+    // createBusinessCategory) are deliberately excluded from admin's global
+    // category management — this view is only for the admin-curated catalog.
+    const where = { isGlobal: true };
     if (status === "active") where.isActive = true;
     if (status === "inactive") where.isActive = false;
 

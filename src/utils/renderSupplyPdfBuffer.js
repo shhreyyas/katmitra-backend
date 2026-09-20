@@ -8,6 +8,36 @@ const MAX_GROUP_TITLE = 200;
 const MAX_LINE_NAME = 200;
 const MAX_LINES_PER_REQUEST = 200;
 
+/**
+ * Display-only unit auto-upgrade, mirroring katmitra-app's
+ * formatSupplyQuantity: once a gram/millilitre value reaches 1000, show it
+ * as kg/ltr instead (e.g. 1500 g -> "1.5 kg"). Units with no defined
+ * conversion (pcs, etc.) pass through unchanged. Does not affect the
+ * underlying stored quantity/unit, only what's printed on the PDF.
+ */
+const UNIT_UPGRADES = {
+  g: { to: "kg", factor: 1000 },
+  ml: { to: "ltr", factor: 1000 },
+  l: { to: "ltr", factor: 1000 },
+  litre: { to: "ltr", factor: 1000 },
+  liter: { to: "ltr", factor: 1000 },
+};
+
+function formatQtyNumber(n) {
+  const rounded = Math.round((n + Number.EPSILON) * 100) / 100;
+  return rounded.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatDisplayQty(quantity, unit) {
+  const n = Number(quantity) || 0;
+  const unitKey = String(unit ?? "").trim().toLowerCase();
+  const upgrade = UNIT_UPGRADES[unitKey];
+  if (upgrade && Math.abs(n) >= upgrade.factor) {
+    return { quantity: formatQtyNumber(n / upgrade.factor), unit: upgrade.to };
+  }
+  return { quantity: formatQtyNumber(n), unit: String(unit ?? "—") };
+}
+
 const PAGE_MARGIN = 48;
 const COL_ITEM_W = 340;
 const COL_QTY_W = 56;
@@ -78,7 +108,12 @@ function renderSupplyPdfBuffer(payload) {
       if (v) companyMetaLines.push(prefix ? `${prefix} ${v}` : v);
     };
     addMeta(payload.companyAddress);
-    addMeta(payload.companyOwnerName, "Owner:");
+    for (const owner of Array.isArray(payload.companyOwners) ? payload.companyOwners : []) {
+      const name = clip(owner?.name);
+      if (!name) continue;
+      const phone = clip(owner?.phone);
+      addMeta(phone ? `${name} (${phone})` : name, "Owner:");
+    }
     addMeta(payload.companyPhone, "Phone:");
     addMeta(payload.companyEmail, "Email:");
     addMeta(payload.companyGst, "GST:");
@@ -182,8 +217,8 @@ function renderSupplyPdfBuffer(payload) {
 
       for (const ln of lines) {
         const name = String(ln?.name ?? "—").slice(0, MAX_LINE_NAME);
-        const qty = Math.max(0, Math.min(999999, Number(ln?.quantity) || 0));
-        const unit = String(ln?.unit ?? "—").slice(0, 32);
+        const rawQty = Math.max(0, Math.min(999999, Number(ln?.quantity) || 0));
+        const { quantity: qty, unit } = formatDisplayQty(rawQty, ln?.unit);
 
         const nameH = doc.heightOfString(name, { width: COL_ITEM_W });
         const rowH = Math.max(22, nameH + 6);
@@ -191,11 +226,11 @@ function renderSupplyPdfBuffer(payload) {
 
         const rowTop = yy;
         doc.text(name, PAGE_MARGIN, rowTop, { width: COL_ITEM_W });
-        doc.text(String(qty), xQty, rowTop, {
+        doc.text(qty, xQty, rowTop, {
           width: COL_QTY_W,
           align: "right",
         });
-        doc.text(unit, xUnit, rowTop, {
+        doc.text(unit.slice(0, 32), xUnit, rowTop, {
           width: COL_UNIT_W,
           align: "right",
         });

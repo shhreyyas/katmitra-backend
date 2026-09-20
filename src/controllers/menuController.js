@@ -6,14 +6,24 @@ const {
   normalizeLocalizedName,
   resolveLocalizedName,
 } = require("../utils/localization");
+const { apiMessage } = require("../utils/apiMessages");
 
 const FOOD_TYPES = new Set(["veg", "non_veg"]);
 
-async function loadCategoryBySlug(slug) {
-  return prisma.menuCategory.findUnique({
+/**
+ * A menu item's category must be either a global (admin) category or one
+ * owned by the requesting business — without this check, a business could
+ * attach another business's private category to their own menu item just
+ * by knowing/guessing its slug.
+ */
+async function loadCategoryBySlug(slug, businessId) {
+  const row = await prisma.menuCategory.findUnique({
     where: { slug },
-    select: { slug: true, name: true },
+    select: { slug: true, name: true, isActive: true, isGlobal: true, businessId: true },
   });
+  if (!row || !row.isActive) return null;
+  if (row.isGlobal || row.businessId === businessId) return row;
+  return null;
 }
 
 /**
@@ -42,6 +52,14 @@ function canViewMenuItem(menu, contextBusinessId, userId) {
   return dg;
 }
 
+/**
+ * Each ingredient row is `{ name, qty, unit, cost, supply_item_id? }`, where
+ * `qty` is the amount of that ingredient needed to prepare the dish for
+ * 100 guests (not 1 guest/plate) — see md/menu.md. Existing rows created
+ * before this convention were migrated ×100 by a one-time data migration
+ * (prisma/migrations/*_ingredient_qty_per_100_guests) so they continue to
+ * compute correctly under supplyController.js's scaling formula.
+ */
 function normalizeIngredients(raw) {
   if (raw == null) return [];
   if (!Array.isArray(raw)) return [];
@@ -329,7 +347,7 @@ exports.createMenuItem = async (req, res) => {
         "category_slug is required.",
       );
     }
-    const categoryRow = await loadCategoryBySlug(categorySlug);
+    const categoryRow = await loadCategoryBySlug(categorySlug, businessId);
     if (!categoryRow) {
       return errorResponse(
         res,
@@ -825,7 +843,7 @@ exports.updateMenuItem = async (req, res) => {
           "category_slug must be a non-empty string.",
         );
       }
-      const categoryRow = await loadCategoryBySlug(slug);
+      const categoryRow = await loadCategoryBySlug(slug, businessId);
       if (!categoryRow) {
         return errorResponse(
           res,
@@ -1044,6 +1062,7 @@ exports.updateMenuItem = async (req, res) => {
 
 exports.deleteMenuItem = async (req, res) => {
   try {
+    const requestedLanguage = getRequestedLanguage(req);
     const userId = req.user.userId;
     const businessId = req.businessId;
     const { id } = req.params;
@@ -1093,9 +1112,44 @@ exports.deleteMenuItem = async (req, res) => {
       );
     }
 
-    await prisma.menuItem.delete({
-      where: { id: menu.id },
-    });
+    // BookingMenuItem/QuotationMenuItem/DishMenuItem all reference MenuItem
+    // with onDelete: Restrict, so the DB rejects a hard delete once this item
+    // has ever been booked/quoted/added to a dish — those rows are historical
+    // snapshots that must keep resolving. Check up front and steer the user
+    // to deactivateMenuItem (is_active: false) instead of a raw 500.
+    const [bookingUse, quotationUse, dishUse] = await Promise.all([
+      prisma.bookingMenuItem.findFirst({
+        where: { menuItemId: menu.id },
+        select: { id: true },
+      }),
+      prisma.quotationMenuItem.findFirst({
+        where: { menuItemId: menu.id },
+        select: { id: true },
+      }),
+      prisma.dishMenuItem.findFirst({
+        where: { menuItemId: menu.id },
+        select: { id: true },
+      }),
+    ]);
+    if (bookingUse || quotationUse || dishUse) {
+      const msg = apiMessage("menuItem.inUse", requestedLanguage);
+      return errorResponse(res, msg, 422, "MENU_ITEM_IN_USE", msg);
+    }
+
+    try {
+      await prisma.menuItem.delete({
+        where: { id: menu.id },
+      });
+    } catch (deleteError) {
+      if (
+        deleteError instanceof Prisma.PrismaClientKnownRequestError &&
+        deleteError.code === "P2003"
+      ) {
+        const msg = apiMessage("menuItem.inUse", requestedLanguage);
+        return errorResponse(res, msg, 422, "MENU_ITEM_IN_USE", msg);
+      }
+      throw deleteError;
+    }
 
     return successResponse(res, "Menu item deleted successfully", null, 200);
   } catch (error) {

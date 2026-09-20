@@ -21,6 +21,7 @@ const {
   getEventSupplySummary,
   getBookingEventsSupplySummaries,
   getSuggestedEventSupplyFromMenu,
+  listUnsavedSupplyEvents,
   getFullBookingPdfSupplyBreakdown,
   createVendor,
   listVendors,
@@ -150,6 +151,15 @@ router.get(
   authMiddleware,
   businessContextMiddleware,
   getSuggestedEventSupplyFromMenu,
+);
+// Booking events with a menu-derived (or already set-but-unsaved) ingredient
+// list that was never explicitly saved as a SupplySavedList — powers the
+// main Supply Lists screen's "not saved yet" section. Computed live.
+router.get(
+  "/v1/supplyUnsavedEvents",
+  authMiddleware,
+  businessContextMiddleware,
+  listUnsavedSupplyEvents,
 );
 router.get(
   "/v1/bookings/:id/fullPdfSupplyBreakdown",

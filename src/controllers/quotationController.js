@@ -13,6 +13,7 @@ const {
   fetchExtraServicesForLines,
   buildExtraServiceLineRows,
 } = require("./extraServiceController");
+const { normalizeKitchenType } = require("../utils/kitchenType");
 
 /** Flattens every event's `extra_service_lines` into one array for a single up-front catalog fetch. */
 function allExtraServiceLinesFromEvents(events) {
@@ -215,6 +216,7 @@ function serializeQuotation(q) {
     client_email: q.clientEmail ?? null,
     client_address: q.clientAddress ?? null,
     function_type: q.functionType ?? null,
+    kitchen_type: q.kitchenType ?? null,
     // Legacy mirror of events[0] — kept in sync so older callers / the Schedule tab's
     // date filter (which queries this column directly) keep working unmodified.
     event_date: first?.event_at ?? (q.eventDate?.toISOString?.() ?? q.eventDate),
@@ -322,6 +324,12 @@ async function createQuotation(req, res) {
 
     const events = Array.isArray(body.events) ? body.events : [];
     const firstEvent = events[0] ?? null;
+
+    const kitchenType = normalizeKitchenType(body.kitchen_type);
+    if (kitchenType === undefined) {
+      return errorResponse(res, "Invalid kitchen type", 200, "VALIDATION_ERROR");
+    }
+
     const legacyMenu = legacyMenuFieldsFromBody(body);
 
     const menuItemIds = Array.isArray(legacyMenu.menu_item_ids) ? legacyMenu.menu_item_ids : [];
@@ -392,6 +400,7 @@ async function createQuotation(req, res) {
             String(firstEvent?.function_type ?? body.function_type).trim() !== ""
               ? String(firstEvent?.function_type ?? body.function_type).trim()
               : null,
+          kitchenType,
           eventDate: (firstEvent?.event_at ?? body.event_date)
             ? new Date(firstEvent?.event_at ?? body.event_date)
             : null,
@@ -526,6 +535,11 @@ async function updateQuotation(req, res) {
     const events = eventsProvided ? body.events : [];
     const firstEvent = events[0] ?? null;
 
+    const nextKitchenType = normalizeKitchenType(body.kitchen_type);
+    if (body.kitchen_type !== undefined && nextKitchenType === undefined) {
+      return errorResponse(res, "Invalid kitchen type", 200, "VALIDATION_ERROR");
+    }
+
     let menus = [];
     const legacyMenu = eventsProvided ? legacyMenuFieldsFromBody(body) : null;
     const menuIdsToResolve = eventsProvided
@@ -652,6 +666,7 @@ async function updateQuotation(req, res) {
                 ? String(firstEvent?.function_type ?? body.function_type).trim()
                 : null
               : existing.functionType,
+          kitchenType: body.kitchen_type !== undefined ? nextKitchenType : existing.kitchenType,
           eventDate:
             (firstEvent?.event_at ?? body.event_date) !== undefined
               ? (firstEvent?.event_at ?? body.event_date)
@@ -802,6 +817,7 @@ async function convertQuotationToBooking(req, res) {
           eventRangeEnd,
           eventLocation: null,
           functionType: firstEvent?.functionType ?? existing.functionType,
+          kitchenType: existing.kitchenType,
           guestCount: firstEvent?.guestCount ?? existing.guestCount,
           discountAmount: existing.discountAmount,
           serviceChargePct: existing.serviceChargePct,
