@@ -1562,20 +1562,6 @@ async function deleteEvent(req, res) {
     if (existing.status === "CANCELLED") {
       return errorResponse(res, "Cancelled booking cannot be updated", 200, "VALIDATION_ERROR");
     }
-    // A completed order's events may also be deleted (per the Completed Orders
-    // restructure) — the 12h-before-event cutoff below is skipped for these too,
-    // since a completed order's events are already in the past. A plain
-    // CONFIRMED-but-not-completed booking stays locked; that guard is for
-    // mid-flight event edits and is unrelated to the completed-order case.
-    const isCompletedOrder = Boolean(existing.completedAt);
-    if (existing.status !== "DRAFT" && !isCompletedOrder) {
-      return errorResponse(
-        res,
-        "Confirmed booking is locked for event/menu updates.",
-        200,
-        "VALIDATION_ERROR",
-      );
-    }
 
     const currentEvents = existing.events || [];
     const target = currentEvents.find((ev) => ev.id === eventId);
@@ -1586,14 +1572,6 @@ async function deleteEvent(req, res) {
       return errorResponse(
         res,
         "Cannot delete the last event. Delete booking instead.",
-        200,
-        "VALIDATION_ERROR",
-      );
-    }
-    if (!isCompletedOrder && !canEditBeforeEventCutoff(target.eventAt, existing.status)) {
-      return errorResponse(
-        res,
-        "Event can only be deleted more than 12 hours before the event time.",
         200,
         "VALIDATION_ERROR",
       );

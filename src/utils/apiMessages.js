@@ -35,7 +35,7 @@ const MESSAGES = {
   "bookingEvent.notFound": {
     en: "Event not found",
     hi: "इवेंट नहीं मिला",
-    gu: "ઇવેન્ટ મળ્યો નથી",
+    gu: "કાર્યક્રમ મળ્યો નથી",
   },
   "category.nameRequired": {
     en: "Category name is required",

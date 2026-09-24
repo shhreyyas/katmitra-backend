@@ -112,7 +112,7 @@ function renderSupplyPdfBuffer(payload) {
       const name = clip(owner?.name);
       if (!name) continue;
       const phone = clip(owner?.phone);
-      addMeta(phone ? `${name} (${phone})` : name, "Owner:");
+      addMeta(phone ? `${name} (${phone})` : name);
     }
     addMeta(payload.companyPhone, "Phone:");
     addMeta(payload.companyEmail, "Email:");
