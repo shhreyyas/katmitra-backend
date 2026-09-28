@@ -50,11 +50,19 @@ function formatTitleDate(d) {
  * @param {{ customerName?: string|null }|null} opts.booking
  * @param {Date} [opts.at]
  */
-function buildSavedListTitle({ booking, at }) {
-  const now = at ?? new Date();
-  const dateStr = formatTitleDate(now);
+/**
+ * "Customer - Function type" (e.g. "Shreyas Tarar - Wedding Reception"),
+ * localized to the request language. Falls back to the date only when
+ * neither a customer name nor a function type is available.
+ */
+function buildSavedListTitle({ booking, at, language }) {
   const customerName = booking?.customerName ? String(booking.customerName).trim() : "";
-  return customerName ? `${customerName} - ${dateStr}` : dateStr;
+  const functionLabel = booking?.functionType
+    ? resolveFunctionTypeLabel(booking.functionType, language) || ""
+    : "";
+  const parts = [customerName, functionLabel].filter(Boolean);
+  if (parts.length > 0) return parts.join(" - ");
+  return formatTitleDate(at ?? new Date());
 }
 
 function serializeSavedItem(row, lang) {
@@ -121,7 +129,7 @@ async function persistAutoSupplyList({
     );
   const categoriesLabel = categoryLabels.length <= 1 ? categoryLabels[0] ?? "" : categoryLabels.join(", ");
 
-  const title = buildSavedListTitle({ booking, at: new Date() });
+  const title = buildSavedListTitle({ booking, at: new Date(), language });
 
   return prisma.supplySavedList.create({
     data: {
@@ -241,7 +249,14 @@ async function autoSaveSupplyListsForConfirmedBooking({ businessId, userId, lang
       userId,
       language,
       bookingId: booking.id,
-      booking: { customerName: booking.customerName },
+      booking: {
+        customerName: booking.customerName,
+        // Booking-level type first; older bookings only carry it per event.
+        functionType:
+          booking.functionType ||
+          events.find((e) => e.functionType)?.functionType ||
+          null,
+      },
       lines,
     });
   } catch (err) {

@@ -1,4 +1,5 @@
 const prisma = require("../config/prisma");
+const { resolveFunctionTypeLabel } = require("../utils/functionTypeLabels");
 const { successResponse, errorResponse } = require("../utils/response");
 const { renderSupplyPdfBuffer } = require("../utils/renderSupplyPdfBuffer");
 const {
@@ -2128,17 +2129,20 @@ function formatUnsavedEventTitleDate(d) {
 }
 
 /**
- * Same identity idea as supplySavedListController.js's buildSavedListTitle
- * (customer + date) but without a categories segment — this is a live/
- * unsaved entry, not a persisted list, so there's no items table to derive
- * category labels from without an extra query. No function-type segment
- * either, since this represents the whole booking (possibly several events
- * with different function types), not one specific event.
+ * Same "Customer - Function type" title as supplySavedListController.js's
+ * buildSavedListTitle, so an entry keeps its title once it gets saved. Uses
+ * the booking-level function type, falling back to the first event that has
+ * one; falls back to the soonest event date when neither name nor type exists.
  */
-function buildUnsavedBookingTitle({ customerName, eventAt }) {
-  const prefix = customerName && String(customerName).trim() ? String(customerName).trim() : "Booking";
+function buildUnsavedBookingTitle({ customerName, functionType, eventAt, language }) {
+  const name = customerName && String(customerName).trim() ? String(customerName).trim() : "";
+  const functionLabel = functionType
+    ? resolveFunctionTypeLabel(functionType, language) || ""
+    : "";
+  const parts = [name, functionLabel].filter(Boolean);
+  if (parts.length > 0) return parts.join(" - ");
   const dateStr = eventAt ? formatUnsavedEventTitleDate(eventAt) : "";
-  return dateStr ? `${prefix} - ${dateStr}` : prefix;
+  return dateStr || "Booking";
 }
 
 /**
@@ -2168,6 +2172,7 @@ async function listUnsavedSupplyEvents(req, res) {
       select: {
         id: true,
         customerName: true,
+        functionType: true,
         events: {
           where: { eventAt: { gte: now } },
           select: {
@@ -2280,7 +2285,12 @@ async function listUnsavedSupplyEvents(req, res) {
         booking_id: booking.id,
         title: buildUnsavedBookingTitle({
           customerName: booking.customerName,
+          functionType:
+            booking.functionType ||
+            booking.events.find((e) => e.functionType)?.functionType ||
+            null,
           eventAt: soonestEventAt,
+          language,
         }),
         item_count: combined.size,
         event_at: soonestEventAt ? soonestEventAt.toISOString() : null,
