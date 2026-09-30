@@ -578,7 +578,8 @@ model BookingSupplyItem {
   id           String             @id @default(uuid())
   bookingId    String
   supplyItemId String
-  quantity     Int                @default(1)
+  /// Fractional for ingredients (1.5 kg); utensils are whole pieces.
+  quantity     Float              @default(1)
   unit         String
   categorySlug String
   category     SupplyItemCategory @relation(fields: [categorySlug], references: [slug], onDelete: Restrict)
@@ -817,12 +818,15 @@ model SupplySavedList {
   /// Set for a list scoped to one specific event (manual per-event save flow).
   bookingEventId  String?
   bookingEvent    BookingEvent?         @relation(fields: [bookingEventId], references: [id], onDelete: SetNull)
-  /// Set for a list combining every event on a booking (auto-saved on
-  /// confirmBooking) — mutually exclusive with bookingEventId by convention,
-  /// not enforced at the DB level.
+  /// Set for an order supply list: one per confirmed booking, combining
+  /// every event. Mutually exclusive with bookingEventId by convention, not
+  /// enforced at the DB level. Deleting the booking deletes its list.
   bookingId       String?
-  booking         Booking?              @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  booking         Booking?              @relation(fields: [bookingId], references: [id], onDelete: Cascade)
   categoriesLabel String?               @db.VarChar(512)
+  /// Order supply lists mirror their booking's supply breakdown and are
+  /// regenerated whenever the booking's supply changes or the list is opened.
+  autoSync        Boolean               @default(false)
   createdAt       DateTime              @default(now())
   updatedAt       DateTime              @updatedAt
   items           SupplySavedListItem[]
@@ -830,6 +834,8 @@ model SupplySavedList {
   @@index([businessId, createdAt(sort: Desc)])
   @@index([bookingEventId])
   @@index([bookingId])
+  /// At most one order list per booking (NULL bookingIds don't collide).
+  @@unique([businessId, bookingId])
 }
 
 model SupplySavedListItem {
@@ -838,7 +844,8 @@ model SupplySavedListItem {
   list         SupplySavedList @relation(fields: [listId], references: [id], onDelete: Cascade)
   supplyItemId String
   supplyItem   SupplyItem      @relation(fields: [supplyItemId], references: [id], onDelete: Restrict)
-  quantity     Int
+  /// Fractional quantities allowed (e.g. 1.5 kg), same as BookingEventSupplyItem.
+  quantity     Float
   unit         String
   categorySlug String
   nameSnapshot Json

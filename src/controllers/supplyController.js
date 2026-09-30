@@ -664,6 +664,21 @@ async function deleteSupplyUnit(req, res) {
   }
 }
 
+/**
+ * Brings the booking's order supply list up to date right after its supply
+ * is edited, so the Supply Lists counts are correct on the very next load.
+ * Required lazily — supplySavedListController requires this module.
+ */
+async function syncOrderSupplyListAfterEdit({ bookingId, businessId, userId, req }) {
+  const { syncOrderSupplyListForBooking } = require("./supplySavedListController");
+  await syncOrderSupplyListForBooking({
+    bookingId,
+    businessId,
+    userId,
+    language: getRequestedLanguage(req),
+  });
+}
+
 async function setBookingSupplyItems(req, res) {
   try {
     const businessId = req.businessId;
@@ -760,6 +775,7 @@ async function setBookingSupplyItems(req, res) {
         ? [prisma.bookingSupplyItem.createMany({ data: createRows })]
         : []),
     ]);
+    await syncOrderSupplyListAfterEdit({ bookingId, businessId, userId: req.user?.userId, req });
     return successResponse(res, "Supply items updated", { ok: true });
   } catch (e) {
     console.error("setBookingSupplyItems:", e);
@@ -972,6 +988,7 @@ async function setEventSupplyItems(req, res) {
         ? [prisma.bookingEventSupplyItem.createMany({ data: createRows })]
         : []),
     ]);
+    await syncOrderSupplyListAfterEdit({ bookingId, businessId, userId, req });
     return successResponse(res, "Event supply items updated", { ok: true });
   } catch (e) {
     console.error("setEventSupplyItems:", e);
@@ -1496,6 +1513,210 @@ async function computeMenuItemIngredientBreakdown(
  * actually-saved supply-list quantities; an event with nothing saved yet
  * falls back to its recipe-computed sum so it isn't silently omitted.
  */
+/**
+ * Shared core of the full-booking supply breakdown: every event's recipe
+ * ingredients (always recomputed from the current guest count), event-level
+ * extras not covered by a recipe, saved utensils, booking-wide totals and
+ * manually added booking-level items. Used by the fullPdfSupplyBreakdown
+ * endpoint and by order-linked saved supply lists, so both always agree.
+ */
+async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, language, includeEmpty = false }) {
+  const categoryLabelMap = await buildSupplyCategoryLabelMap(language);
+
+  const events = await prisma.bookingEvent.findMany({
+    where: { bookingId },
+    orderBy: { eventAt: "asc" },
+    select: { id: true, eventSnapshot: true, guestCount: true, eventAt: true },
+  });
+
+  const savedRows = await prisma.bookingEventSupplyItem.findMany({
+    where: { bookingEvent: { bookingId } },
+    orderBy: { createdAt: "asc" },
+  });
+  /** `${eventId}\t${itemType}` -> rows[] */
+  const savedByEventAndType = new Map();
+  for (const row of savedRows) {
+    const key = `${row.bookingEventId}\t${row.itemType}`;
+    if (!savedByEventAndType.has(key)) savedByEventAndType.set(key, []);
+    savedByEventAndType.get(key).push(row);
+  }
+
+  const eventsOut = [];
+  /** supplyItemId (or synthetic key for a not-yet-saved fallback) -> accumulator */
+  const ingredientTotals = new Map();
+  const utensilTotals = new Map();
+
+  const addToTotals = (map, key, name, unit, eventId, qty, category) => {
+    const n = Number(qty) || 0;
+    if (n <= 0 && !includeEmpty) return;
+    if (!map.has(key)) {
+      map.set(key, { name, unit, category, perEvent: new Map(), total: 0 });
+    }
+    const entry = map.get(key);
+    // Different events can save the same supply item in different units
+    // (e.g. 100 ml for one event, 10 ltr for another, from a manually
+    // added item's unit picker) — convert into the unit this row was
+    // first recorded in before summing, otherwise the raw numbers get
+    // added together as if they were the same unit (100 + 10 = 110,
+    // instead of 100 ml + 10000 ml = 10100 ml).
+    const converted = convertSupplyQty(n, unit, entry.unit);
+    entry.perEvent.set(eventId, (entry.perEvent.get(eventId) ?? 0) + converted);
+    entry.total += converted;
+  };
+
+  for (const event of events) {
+    const menuItemsBreakdown = await computeMenuItemIngredientBreakdown(
+      event,
+      businessId,
+      userId,
+      language,
+      includeEmpty,
+      categoryLabelMap,
+    );
+
+    const savedIngredientRows = savedByEventAndType.get(`${event.id}\tINGREDIENT`) ?? [];
+    const savedUtensilRows = savedByEventAndType.get(`${event.id}\tUTENSIL`) ?? [];
+
+    // Recipe-derived ingredients are always recomputed from the current
+    // guest count (never taken from a saved row) so a stale save from
+    // before a guestCount change can't under/over-count the booking-wide
+    // total — see menu.md's per-100-guests scaling convention. A saved row
+    // only contributes here when it's a manual addition with no matching
+    // menu-recipe ingredient for this event.
+    const menuDerivedSupplyIds = new Set();
+    for (const item of menuItemsBreakdown) {
+      for (const ing of item.ingredients) {
+        menuDerivedSupplyIds.add(ing.supply_item_id);
+      }
+    }
+    // Ingredients saved directly on the event (e.g. from the Booking Supply
+    // List screen) that aren't part of any dish's recipe — without this
+    // they only ever showed up in the booking-wide totals table, never in
+    // this event's own ingredient section.
+    const extraIngredientRows = savedIngredientRows.filter(
+      (row) => !menuDerivedSupplyIds.has(row.supplyItemId),
+    );
+
+    eventsOut.push({
+      event_id: event.id,
+      menu_items: menuItemsBreakdown.map(({ menu_item_id, name, ingredients }) => ({
+        menu_item_id,
+        name,
+        ingredients: ingredients.map(({ name: n, unit, quantity, category_slug, category_label }) => ({
+          name: n,
+          unit,
+          quantity,
+          category_slug,
+          category_label,
+        })),
+      })),
+      extra_ingredients: extraIngredientRows.map((row) => ({
+        name: resolveLocalizedName(row.nameSnapshot, language),
+        unit: row.unit,
+        quantity: row.quantity,
+        category_slug: row.categorySlug,
+        category_label: supplyCategoryLabelFor(categoryLabelMap, row.categorySlug),
+      })),
+      utensils: savedUtensilRows.map((row) => ({
+        name: resolveLocalizedName(row.nameSnapshot, language),
+        quantity: row.quantity,
+        unit: row.unit,
+      })),
+    });
+
+    for (const item of menuItemsBreakdown) {
+      for (const ing of item.ingredients) {
+        addToTotals(
+          ingredientTotals,
+          ing.supply_item_id,
+          ing.name,
+          ing.unit,
+          event.id,
+          ing.quantity,
+          ing.category_slug,
+        );
+      }
+    }
+    for (const row of extraIngredientRows) {
+      addToTotals(
+        ingredientTotals,
+        row.supplyItemId,
+        resolveLocalizedName(row.nameSnapshot, language),
+        row.unit,
+        event.id,
+        row.quantity,
+        row.categorySlug,
+      );
+    }
+
+    for (const row of savedUtensilRows) {
+      addToTotals(
+        utensilTotals,
+        row.supplyItemId,
+        resolveLocalizedName(row.nameSnapshot, language),
+        row.unit,
+        event.id,
+        row.quantity,
+        row.categorySlug,
+      );
+    }
+  }
+
+  const toRows = (map) =>
+    [...map.entries()]
+      .map(([supplyItemId, e]) => ({
+        supply_item_id: supplyItemId,
+        name: e.name,
+        unit: e.unit,
+        category_slug: e.category,
+        category_label: supplyCategoryLabelFor(categoryLabelMap, e.category),
+        per_event: Object.fromEntries(
+          [...e.perEvent.entries()].map(([eid, q]) => [eid, Math.round(q * 100) / 100]),
+        ),
+        total: Math.round(e.total * 100) / 100,
+      }))
+      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+
+  // Manually-added booking-wide items (from the Booking Supply List screen)
+  // aren't tied to any event — surfaced separately so callers (Documents
+  // hub) can fold them into "whole booking" PDFs without misattributing
+  // them to one arbitrary event.
+  const bookingLevelRows = await prisma.bookingSupplyItem.findMany({
+    where: { bookingId },
+    include: { supplyItem: { select: { type: true } } },
+    orderBy: { createdAt: "asc" },
+  });
+  const bookingLevelIngredients = [];
+  const bookingLevelUtensils = [];
+  for (const row of bookingLevelRows) {
+    const out = {
+      supply_item_id: row.supplyItemId,
+      name: resolveLocalizedName(row.nameSnapshot, language),
+      quantity: row.quantity,
+      unit: row.unit,
+      category_slug: row.categorySlug,
+      category_label: supplyCategoryLabelFor(categoryLabelMap, row.categorySlug),
+    };
+    if (row.supplyItem?.type === "UTENSIL") {
+      bookingLevelUtensils.push(out);
+    } else {
+      bookingLevelIngredients.push(out);
+    }
+  }
+
+  return {
+    events: eventsOut,
+    totals: {
+      ingredients: toRows(ingredientTotals),
+      utensils: toRows(utensilTotals),
+    },
+    booking_level: {
+      ingredients: bookingLevelIngredients,
+      utensils: bookingLevelUtensils,
+    },
+  };
+}
+
 async function getFullBookingPdfSupplyBreakdown(req, res) {
   try {
     const businessId = req.businessId;
@@ -1514,199 +1735,14 @@ async function getFullBookingPdfSupplyBreakdown(req, res) {
     });
     if (!booking) return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
 
-    const categoryLabelMap = await buildSupplyCategoryLabelMap(language);
-
-    const events = await prisma.bookingEvent.findMany({
-      where: { bookingId },
-      orderBy: { eventAt: "asc" },
-      select: { id: true, eventSnapshot: true, guestCount: true, eventAt: true },
+    const data = await buildFullBookingSupplyBreakdown({
+      bookingId,
+      businessId,
+      userId,
+      language,
+      includeEmpty,
     });
-
-    const savedRows = await prisma.bookingEventSupplyItem.findMany({
-      where: { bookingEvent: { bookingId } },
-      orderBy: { createdAt: "asc" },
-    });
-    /** `${eventId}\t${itemType}` -> rows[] */
-    const savedByEventAndType = new Map();
-    for (const row of savedRows) {
-      const key = `${row.bookingEventId}\t${row.itemType}`;
-      if (!savedByEventAndType.has(key)) savedByEventAndType.set(key, []);
-      savedByEventAndType.get(key).push(row);
-    }
-
-    const eventsOut = [];
-    /** supplyItemId (or synthetic key for a not-yet-saved fallback) -> accumulator */
-    const ingredientTotals = new Map();
-    const utensilTotals = new Map();
-
-    const addToTotals = (map, key, name, unit, eventId, qty, category) => {
-      const n = Number(qty) || 0;
-      if (n <= 0 && !includeEmpty) return;
-      if (!map.has(key)) {
-        map.set(key, { name, unit, category, perEvent: new Map(), total: 0 });
-      }
-      const entry = map.get(key);
-      // Different events can save the same supply item in different units
-      // (e.g. 100 ml for one event, 10 ltr for another, from a manually
-      // added item's unit picker) — convert into the unit this row was
-      // first recorded in before summing, otherwise the raw numbers get
-      // added together as if they were the same unit (100 + 10 = 110,
-      // instead of 100 ml + 10000 ml = 10100 ml).
-      const converted = convertSupplyQty(n, unit, entry.unit);
-      entry.perEvent.set(eventId, (entry.perEvent.get(eventId) ?? 0) + converted);
-      entry.total += converted;
-    };
-
-    for (const event of events) {
-      const menuItemsBreakdown = await computeMenuItemIngredientBreakdown(
-        event,
-        businessId,
-        userId,
-        language,
-        includeEmpty,
-        categoryLabelMap,
-      );
-
-      const savedIngredientRows = savedByEventAndType.get(`${event.id}\tINGREDIENT`) ?? [];
-      const savedUtensilRows = savedByEventAndType.get(`${event.id}\tUTENSIL`) ?? [];
-
-      // Recipe-derived ingredients are always recomputed from the current
-      // guest count (never taken from a saved row) so a stale save from
-      // before a guestCount change can't under/over-count the booking-wide
-      // total — see menu.md's per-100-guests scaling convention. A saved row
-      // only contributes here when it's a manual addition with no matching
-      // menu-recipe ingredient for this event.
-      const menuDerivedSupplyIds = new Set();
-      for (const item of menuItemsBreakdown) {
-        for (const ing of item.ingredients) {
-          menuDerivedSupplyIds.add(ing.supply_item_id);
-        }
-      }
-      // Ingredients saved directly on the event (e.g. from the Booking Supply
-      // List screen) that aren't part of any dish's recipe — without this
-      // they only ever showed up in the booking-wide totals table, never in
-      // this event's own ingredient section.
-      const extraIngredientRows = savedIngredientRows.filter(
-        (row) => !menuDerivedSupplyIds.has(row.supplyItemId),
-      );
-
-      eventsOut.push({
-        event_id: event.id,
-        menu_items: menuItemsBreakdown.map(({ menu_item_id, name, ingredients }) => ({
-          menu_item_id,
-          name,
-          ingredients: ingredients.map(({ name: n, unit, quantity, category_slug, category_label }) => ({
-            name: n,
-            unit,
-            quantity,
-            category_slug,
-            category_label,
-          })),
-        })),
-        extra_ingredients: extraIngredientRows.map((row) => ({
-          name: resolveLocalizedName(row.nameSnapshot, language),
-          unit: row.unit,
-          quantity: row.quantity,
-          category_slug: row.categorySlug,
-          category_label: supplyCategoryLabelFor(categoryLabelMap, row.categorySlug),
-        })),
-        utensils: savedUtensilRows.map((row) => ({
-          name: resolveLocalizedName(row.nameSnapshot, language),
-          quantity: row.quantity,
-          unit: row.unit,
-        })),
-      });
-
-      for (const item of menuItemsBreakdown) {
-        for (const ing of item.ingredients) {
-          addToTotals(
-            ingredientTotals,
-            ing.supply_item_id,
-            ing.name,
-            ing.unit,
-            event.id,
-            ing.quantity,
-            ing.category_slug,
-          );
-        }
-      }
-      for (const row of extraIngredientRows) {
-        addToTotals(
-          ingredientTotals,
-          row.supplyItemId,
-          resolveLocalizedName(row.nameSnapshot, language),
-          row.unit,
-          event.id,
-          row.quantity,
-          row.categorySlug,
-        );
-      }
-
-      for (const row of savedUtensilRows) {
-        addToTotals(
-          utensilTotals,
-          row.supplyItemId,
-          resolveLocalizedName(row.nameSnapshot, language),
-          row.unit,
-          event.id,
-          row.quantity,
-          row.categorySlug,
-        );
-      }
-    }
-
-    const toRows = (map) =>
-      [...map.entries()]
-        .map(([supplyItemId, e]) => ({
-          supply_item_id: supplyItemId,
-          name: e.name,
-          unit: e.unit,
-          category_slug: e.category,
-          category_label: supplyCategoryLabelFor(categoryLabelMap, e.category),
-          per_event: Object.fromEntries(
-            [...e.perEvent.entries()].map(([eid, q]) => [eid, Math.round(q * 100) / 100]),
-          ),
-          total: Math.round(e.total * 100) / 100,
-        }))
-        .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
-
-    // Manually-added booking-wide items (from the Booking Supply List screen)
-    // aren't tied to any event — surfaced separately so callers (Documents
-    // hub) can fold them into "whole booking" PDFs without misattributing
-    // them to one arbitrary event.
-    const bookingLevelRows = await prisma.bookingSupplyItem.findMany({
-      where: { bookingId },
-      include: { supplyItem: { select: { type: true } } },
-      orderBy: { createdAt: "asc" },
-    });
-    const bookingLevelIngredients = [];
-    const bookingLevelUtensils = [];
-    for (const row of bookingLevelRows) {
-      const out = {
-        name: resolveLocalizedName(row.nameSnapshot, language),
-        quantity: row.quantity,
-        unit: row.unit,
-        category_slug: row.categorySlug,
-        category_label: supplyCategoryLabelFor(categoryLabelMap, row.categorySlug),
-      };
-      if (row.supplyItem?.type === "UTENSIL") {
-        bookingLevelUtensils.push(out);
-      } else {
-        bookingLevelIngredients.push(out);
-      }
-    }
-
-    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
-      events: eventsOut,
-      totals: {
-        ingredients: toRows(ingredientTotals),
-        utensils: toRows(utensilTotals),
-      },
-      booking_level: {
-        ingredients: bookingLevelIngredients,
-        utensils: bookingLevelUtensils,
-      },
-    });
+    return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), data);
   } catch (e) {
     console.error("getFullBookingPdfSupplyBreakdown:", e);
     return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
@@ -2798,6 +2834,8 @@ module.exports = {
   computeEventMenuIngredientData,
   canViewMenuItemForSupply,
   getFullBookingPdfSupplyBreakdown,
+  buildFullBookingSupplyBreakdown,
+  convertSupplyQty,
   createVendor,
   listVendors,
   updateVendor,

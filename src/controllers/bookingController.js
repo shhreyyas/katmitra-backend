@@ -8,7 +8,20 @@ const { sortEventsByMealTime } = require("../utils/eventOrder");
 const { apiMessage } = require("../utils/apiMessages");
 const {
   autoSaveSupplyListsForConfirmedBooking,
+  deleteOrderSupplyListForBooking,
+  syncOrderSupplyListForBooking,
 } = require("./supplySavedListController");
+
+/** Refreshes the order supply list in the background after an event edit
+ * (guest count, menu, dates) — never slows or fails the edit itself. */
+function syncOrderSupplyListInBackground(req, bookingId) {
+  void syncOrderSupplyListForBooking({
+    bookingId,
+    businessId: req.businessId,
+    userId: req.user?.userId,
+    language: getRequestedLanguage(req),
+  });
+}
 
 function deriveIsGlobal(businessId, createdByUserId) {
   if (businessId == null || businessId === "") return true;
@@ -1375,6 +1388,7 @@ async function updateEvent(req, res) {
     const updated = await loadBookingForBusiness(bookingId, businessId, {
       includePayments: true,
     });
+    syncOrderSupplyListInBackground(req, bookingId);
     return successResponse(res, "Event updated", serializeBooking(updated));
   } catch (e) {
     console.error("updateEvent:", e);
@@ -1452,6 +1466,7 @@ async function replaceEventMenuItem(req, res) {
       },
     });
 
+    syncOrderSupplyListInBackground(req, bookingId);
     return successResponse(res, "Event menu item replaced", { updated: true });
   } catch (e) {
     console.error("replaceEventMenuItem:", e);
@@ -1537,6 +1552,7 @@ async function createEvent(req, res) {
     const updated = await loadBookingForBusiness(bookingId, businessId, {
       includePayments: true,
     });
+    syncOrderSupplyListInBackground(req, bookingId);
     return successResponse(res, "Event created", serializeBooking(updated));
   } catch (e) {
     console.error("createEvent:", e);
@@ -1582,6 +1598,7 @@ async function deleteEvent(req, res) {
     const updated = await loadBookingForBusiness(bookingId, businessId, {
       includePayments: true,
     });
+    syncOrderSupplyListInBackground(req, bookingId);
     return successResponse(res, "Event deleted", serializeBooking(updated));
   } catch (e) {
     console.error("deleteEvent:", e);
@@ -2231,6 +2248,7 @@ async function completeBookingOrder(req, res) {
         payments: { orderBy: { createdAt: "desc" } },
       },
     });
+    await deleteOrderSupplyListForBooking(bookingId);
     const enriched = await enrichEventSnapshotMenuImages(updated);
     return successResponse(res, "Order completed", serializeBooking(enriched));
   } catch (e) {
@@ -2351,6 +2369,7 @@ async function cancelBooking(req, res) {
         payments: { orderBy: { createdAt: "desc" } },
       },
     });
+    await deleteOrderSupplyListForBooking(bookingId);
     const enriched = await enrichEventSnapshotMenuImages(updated);
     return successResponse(res, "Booking cancelled", serializeBooking(enriched));
   } catch (e) {
