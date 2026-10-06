@@ -2360,6 +2360,7 @@ function serializeVendor(row) {
   return {
     id: row.id,
     name: row.name,
+    firmName: row.firmName ?? "",
     address: row.address ?? "",
     whatsappNo: row.whatsappNo ?? "",
     categorySlug: row.categorySlug ?? "",
@@ -2381,6 +2382,7 @@ async function createVendor(req, res) {
       .trim()
       .toLowerCase();
     const address = String(body.address ?? "").trim();
+    const firmName = String(body.firmName ?? "").trim();
     if (!name) {
       return errorResponse(res, "Vendor name is required", 200, "VALIDATION_ERROR");
     }
@@ -2399,6 +2401,7 @@ async function createVendor(req, res) {
       data: {
         businessId,
         name,
+        firmName: firmName || null,
         whatsappNo,
         categorySlug,
         address: address || null,
@@ -2430,7 +2433,7 @@ async function listVendors(req, res) {
     });
     const filtered = q
       ? rows.filter((row) => {
-          const hay = `${row.name} ${row.whatsappNo ?? ""} ${row.address ?? ""}`.toLowerCase();
+          const hay = `${row.name} ${row.firmName ?? ""} ${row.whatsappNo ?? ""} ${row.address ?? ""}`.toLowerCase();
           return hay.includes(q);
         })
       : rows;
@@ -2485,6 +2488,10 @@ async function updateVendor(req, res) {
         );
       }
       data.categorySlug = categorySlug;
+    }
+    if (body.firmName !== undefined) {
+      const firmName = String(body.firmName ?? "").trim();
+      data.firmName = firmName || null;
     }
     if (body.address !== undefined) {
       const address = String(body.address ?? "").trim();

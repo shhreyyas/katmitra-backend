@@ -824,6 +824,9 @@ model SupplySavedList {
   bookingId       String?
   booking         Booking?              @relation(fields: [bookingId], references: [id], onDelete: Cascade)
   categoriesLabel String?               @db.VarChar(512)
+  /// Date the caterer picked for this list when saving it (optional; older
+  /// lists and order lists have none).
+  listDate        DateTime?             @db.Date
   /// Order supply lists mirror their booking's supply breakdown and are
   /// regenerated whenever the booking's supply changes or the list is opened.
   autoSync        Boolean               @default(false)
@@ -861,6 +864,7 @@ model Vendor {
   businessId   String
   business     Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   name         String
+  firmName     String?
   address      String?
   whatsappNo   String?
   categorySlug String?

@@ -11,7 +11,14 @@ const {
 } = require("./supplyController");
 const { resolveFunctionTypeLabel } = require("../utils/functionTypeLabels");
 
-const VALID_TYPES_FILTER = { type: "INGREDIENT" };
+/** Saved lists hold ingredients and utensils (every category the booking's
+ * own supply list offers). */
+const VALID_TYPES_FILTER = { type: { in: ["INGREDIENT", "UTENSIL"] } };
+
+/** Utensils are whole pieces; ingredients keep decimals. */
+function normalizeQtyForItem(source, raw) {
+  return source?.type === "UTENSIL" ? normalizeUtensilQty(raw) : normalizeListQty(raw);
+}
 
 function supplyVisibilityOrBranches(businessId, userId) {
   return [
@@ -84,6 +91,35 @@ function serializeSavedItem(row, lang) {
   };
 }
 
+/**
+ * True once the Prisma client knows SupplySavedList.listDate — i.e. after
+ * the listDate migration is applied and the schema field added. Until then
+ * the date is ignored on writes and returned as null.
+ */
+const LIST_DATE_SUPPORTED = Boolean(
+  require("@prisma/client").Prisma.dmmf.datamodel.models
+    .find((m) => m.name === "SupplySavedList")
+    ?.fields.some((f) => f.name === "listDate"),
+);
+
+/**
+ * Parses the list's user-picked date ("YYYY-MM-DD").
+ * Returns undefined when not sent (older app versions), null when invalid.
+ */
+function parseListDate(raw) {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(raw).trim());
+  if (!m) return null;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  if (d.getUTCMonth() !== Number(m[2]) - 1 || d.getUTCDate() !== Number(m[3])) return null;
+  return d;
+}
+
+/** "YYYY-MM-DD" for the API, or null. */
+function formatListDate(d) {
+  return d ? new Date(d).toISOString().slice(0, 10) : null;
+}
+
 function normalizeCustomTitle(raw) {
   const value = String(raw ?? "").trim();
   if (!value) return null;
@@ -94,7 +130,7 @@ function normalizeCustomTitle(raw) {
  * Resolves a set of {supply_item_id, quantity, unit} lines into a real,
  * persisted SupplySavedList (mirrors createSupplySavedList's resolution
  * logic, minus the request/response plumbing). Returns null if none of the
- * lines resolve to a visible, active INGREDIENT supply item.
+ * lines resolve to a visible, active ingredient or utensil supply item.
  */
 async function persistAutoSupplyList({
   businessId,
@@ -153,7 +189,7 @@ async function persistAutoSupplyList({
       items: {
         create: validLines.map((line) => {
           const source = byId.get(line.supply_item_id);
-          const qty = normalizeListQty(line.quantity);
+          const qty = normalizeQtyForItem(source, line.quantity);
           return {
             supplyItemId: source.id,
             quantity: qty,
@@ -168,7 +204,7 @@ async function persistAutoSupplyList({
 }
 
 /**
- * Booking-wide ingredient lines for an order-linked list, from the same
+ * Booking-wide ingredient and utensil lines for an order-linked list, from the same
  * breakdown the full booking PDF / Documents sheet use: recipe ingredients
  * recomputed from each event's current guest count, event-level extras not
  * covered by a recipe, plus manually added booking-level items (which
@@ -197,12 +233,13 @@ async function computeOrderSupplyLines({ businessId, userId, language, bookingId
   };
   // A manually added booking-level row for an item is authoritative over the
   // auto-calculated figure (same rule as the Booking Supply List screen).
-  const manualIds = new Set(breakdown.booking_level.ingredients.map((r) => r.supply_item_id));
-  for (const row of breakdown.totals.ingredients) {
+  const bookingLevel = [...breakdown.booking_level.ingredients, ...breakdown.booking_level.utensils];
+  const manualIds = new Set(bookingLevel.map((r) => r.supply_item_id));
+  for (const row of [...breakdown.totals.ingredients, ...breakdown.totals.utensils]) {
     if (manualIds.has(row.supply_item_id)) continue;
     add(row.supply_item_id, row.total, row.unit);
   }
-  for (const row of breakdown.booking_level.ingredients) add(row.supply_item_id, row.quantity, row.unit);
+  for (const row of bookingLevel) add(row.supply_item_id, row.quantity, row.unit);
   return [...combined.entries()].map(([supply_item_id, v]) => ({
     supply_item_id,
     quantity: v.quantity,
@@ -296,7 +333,7 @@ async function syncOrderSupplyList({ list, businessId, userId, language }) {
       const source = byId.get(line.supply_item_id);
       return {
         supplyItemId: source.id,
-        quantity: normalizeListQty(line.quantity),
+        quantity: normalizeQtyForItem(source, line.quantity),
         unit: String(line.unit || source.defaultUnit || "kg"),
         categorySlug: source.categorySlug,
         nameSnapshot: source.name,
@@ -625,6 +662,10 @@ async function createSupplySavedList(req, res) {
     if (!title) {
       return errorResponse(res, "List name is required", 200, "VALIDATION_ERROR");
     }
+    const listDate = parseListDate(body.list_date);
+    if (listDate === null) {
+      return errorResponse(res, "Invalid list date", 200, "VALIDATION_ERROR");
+    }
     const categoriesLabel =
       categoryLabels.length <= 1
         ? categoryLabels[0] ?? ""
@@ -636,12 +677,13 @@ async function createSupplySavedList(req, res) {
           businessId,
           createdByUserId: userId ?? null,
           title,
+          ...(LIST_DATE_SUPPORTED ? { listDate: listDate ?? null } : {}),
           bookingEventId: bookingEventId || null,
           categoriesLabel,
           items: {
             create: payload.map((row) => {
               const source = byId.get(String(row.supply_item_id || "").trim());
-              const qty = normalizeListQty(row.quantity);
+              const qty = normalizeQtyForItem(source, row.quantity);
               return {
                 supplyItemId: source.id,
                 quantity: qty,
@@ -718,6 +760,7 @@ function formatSavedListSummary(row, lang) {
     item_count: row._count?.items ?? row.items?.length ?? 0,
     categories_label: row.categoriesLabel ?? null,
     function_type: resolveSavedListFunctionType(row, lang),
+    list_date: formatListDate(row.listDate),
     created_at: row.createdAt?.toISOString?.() ?? row.createdAt,
     updated_at: row.updatedAt?.toISOString?.() ?? row.updatedAt,
   };
@@ -734,6 +777,7 @@ function formatSavedListDetail(row, lang) {
     auto_sync: Boolean(row.autoSync),
     categories_label: row.categoriesLabel ?? null,
     function_type: resolveSavedListFunctionType(row, lang),
+    list_date: formatListDate(row.listDate),
     created_at: row.createdAt?.toISOString?.() ?? row.createdAt,
     updated_at: row.updatedAt?.toISOString?.() ?? row.updatedAt,
     items: (row.items || []).map((it) => serializeSavedItem(it, lang)),
@@ -791,6 +835,7 @@ async function listSupplySavedLists(req, res) {
         select: {
           id: true,
           title: true,
+          ...(LIST_DATE_SUPPORTED ? { listDate: true } : {}),
           bookingEventId: true,
           bookingId: true,
           categoriesLabel: true,
@@ -962,6 +1007,10 @@ async function updateSupplySavedList(req, res) {
 
     const customTitle = normalizeCustomTitle(body.title);
     const title = customTitle ?? existing.title;
+    const listDate = parseListDate(body.list_date);
+    if (listDate === null) {
+      return errorResponse(res, "Invalid list date", 200, "VALIDATION_ERROR");
+    }
     const categoriesLabel =
       categoryLabels.length <= 1
         ? categoryLabels[0] ?? ""
@@ -973,11 +1022,13 @@ async function updateSupplySavedList(req, res) {
         where: { id },
         data: {
           title,
+          // Left untouched when the request doesn't send a date.
+          ...(LIST_DATE_SUPPORTED && listDate ? { listDate } : {}),
           categoriesLabel,
           items: {
             create: payload.map((row) => {
               const source = byId.get(String(row.supply_item_id || "").trim());
-              const qty = normalizeListQty(row.quantity);
+              const qty = normalizeQtyForItem(source, row.quantity);
               return {
                 supplyItemId: source.id,
                 quantity: qty,
