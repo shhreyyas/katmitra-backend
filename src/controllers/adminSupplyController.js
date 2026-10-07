@@ -1,10 +1,13 @@
 const prisma = require("../config/prisma");
+const { getSupplyItemUsage } = require("../utils/supplyItemUsage");
+const { logActivity } = require("../utils/activityLog");
 const { successResponse, errorResponse } = require("../utils/response");
 const {
   getRequestedLanguage,
   normalizeLocalizedName,
   resolveLocalizedName,
 } = require("../utils/localization");
+const { parsePaging, findPage, localizedNameMatcher } = require("../utils/adminListPaging");
 
 const VALID_TYPES = new Set(["INGREDIENT", "UTENSIL"]);
 
@@ -87,7 +90,7 @@ exports.listSupplyItems = async (req, res) => {
     const status = String(req.query.status ?? "all").toLowerCase();
     const search = String(req.query.q ?? req.query.search ?? "").trim();
 
-    const where = {};
+    const where = { deletedAt: null };
     if (scope === "global") {
       where.OR = [{ businessId: null }, { isGlobal: true }];
     } else if (scope === "business") {
@@ -99,6 +102,29 @@ exports.listSupplyItems = async (req, res) => {
     if (VALID_TYPES.has(typeRaw)) where.type = typeRaw;
     if (status === "active") where.isActive = true;
     if (status === "inactive") where.isActive = false;
+
+    const paging = parsePaging(req.query);
+    if (paging) {
+      const { rows: pageRows, pagination } = await findPage(prisma.supplyItem, {
+        where,
+        include: {
+          category: true,
+          business: { select: { id: true, name: true } },
+        },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+        paging,
+        matches: search ? localizedNameMatcher(search) : null,
+        matchSelect: { name: true },
+      });
+      const usage = await getSupplyItemUsage(pageRows.map((r) => r.id));
+      return successResponse(res, "Supply items", {
+        items: pageRows.map((r) => ({
+          ...formatAdminSupplyItem(r, language),
+          usage: usage.get(r.id),
+        })),
+        pagination,
+      });
+    }
 
     let rows = await prisma.supplyItem.findMany({
       where,
@@ -234,7 +260,7 @@ exports.updateSupplyItem = async (req, res) => {
     const adminUserId = req.user.userId;
     const { id } = req.params;
 
-    const existing = await prisma.supplyItem.findUnique({ where: { id } });
+    const existing = await prisma.supplyItem.findFirst({ where: { id, deletedAt: null } });
     if (!existing) {
       return errorResponse(res, "Supply item not found", 404, "NOT_FOUND");
     }
@@ -364,11 +390,11 @@ exports.updateSupplyItem = async (req, res) => {
   }
 };
 
-/** DELETE /api/admin/v1/supply-items/:id — soft delete */
+/** DELETE /api/admin/v1/supply-items/:id — deactivate (reversible; stays under the Inactive filter) */
 exports.deleteSupplyItem = async (req, res) => {
   try {
     const { id } = req.params;
-    const existing = await prisma.supplyItem.findUnique({ where: { id } });
+    const existing = await prisma.supplyItem.findFirst({ where: { id, deletedAt: null } });
     if (!existing) {
       return errorResponse(res, "Supply item not found", 404, "NOT_FOUND");
     }
@@ -379,6 +405,82 @@ exports.deleteSupplyItem = async (req, res) => {
     return successResponse(res, "Supply item deleted", { id });
   } catch (error) {
     console.error("deleteSupplyItem admin:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+function describeUsage(u) {
+  const parts = [];
+  if (u.bookings) parts.push(`${u.bookings} booking supply list${u.bookings === 1 ? "" : "s"}`);
+  if (u.booking_events) parts.push(`${u.booking_events} event list${u.booking_events === 1 ? "" : "s"}`);
+  if (u.saved_lists) parts.push(`${u.saved_lists} saved list${u.saved_lists === 1 ? "" : "s"}`);
+  if (u.menu_items) parts.push(`${u.menu_items} menu item${u.menu_items === 1 ? "" : "s"}`);
+  if (u.dishes) parts.push(`${u.dishes} dish${u.dishes === 1 ? "" : "es"}`);
+  return parts.join(", ");
+}
+
+/**
+ * DELETE /api/admin/v1/supply-items/:id/permanent
+ * Removes the row for good. Only allowed while nothing references the item.
+ */
+exports.permanentlyDeleteSupplyItem = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.supplyItem.findFirst({ where: { id, deletedAt: null } });
+    if (!existing) {
+      return errorResponse(res, "Supply item not found", 404, "NOT_FOUND");
+    }
+    const usage = (await getSupplyItemUsage([id])).get(id);
+    if (usage.total > 0) {
+      return errorResponse(
+        res,
+        `This item is used in ${describeUsage(usage)}. Use force delete to remove it from the catalog without changing those.`,
+        409,
+        "IN_USE",
+      );
+    }
+    await prisma.supplyItem.delete({ where: { id } });
+    logActivity({
+      type: "supply_item_deleted",
+      message: `Supply item deleted: ${existing.name?.en ?? id}`,
+      actorUserId: req.user.userId,
+      meta: { supply_item_id: id, mode: "permanent" },
+    });
+    return successResponse(res, "Supply item deleted", { id });
+  } catch (error) {
+    console.error("permanentlyDeleteSupplyItem admin:", error.message);
+    if (error.code === "P2003") {
+      return errorResponse(res, "This item is still in use and cannot be deleted", 409, "IN_USE");
+    }
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+/**
+ * POST /api/admin/v1/supply-items/:id/force-delete
+ * Removes the item from the catalog and every picker while keeping the row, so
+ * bookings, saved lists, menu items and dishes that already use it are unchanged.
+ */
+exports.forceDeleteSupplyItem = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.supplyItem.findFirst({ where: { id, deletedAt: null } });
+    if (!existing) {
+      return errorResponse(res, "Supply item not found", 404, "NOT_FOUND");
+    }
+    const usage = (await getSupplyItemUsage([id])).get(id);
+    await prisma.supplyItem.update({ where: { id }, data: { deletedAt: new Date() } });
+    logActivity({
+      type: "supply_item_deleted",
+      message: `Supply item force deleted: ${existing.name?.en ?? id}${
+        usage.total ? ` (still referenced by ${describeUsage(usage)})` : ""
+      }`,
+      actorUserId: req.user.userId,
+      meta: { supply_item_id: id, mode: "force", usage },
+    });
+    return successResponse(res, "Supply item deleted", { id, usage });
+  } catch (error) {
+    console.error("forceDeleteSupplyItem admin:", error.message);
     return errorResponse(res, "Server error", 500, "ERROR");
   }
 };

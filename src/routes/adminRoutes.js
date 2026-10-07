@@ -23,12 +23,15 @@ const {
   createMenuItem,
   updateMenuItem,
   deleteMenuItem,
+  forceDeleteMenuItem,
 } = require("../controllers/adminMenuController");
 const {
   listSupplyItems,
   createSupplyItem,
   updateSupplyItem,
   deleteSupplyItem,
+  permanentlyDeleteSupplyItem,
+  forceDeleteSupplyItem,
 } = require("../controllers/adminSupplyController");
 const {
   listUnits,
@@ -47,6 +50,8 @@ const {
   createExtraService,
   updateExtraService,
   deleteExtraService,
+  permanentlyDeleteExtraService,
+  forceDeleteExtraService,
 } = require("../controllers/adminExtraServiceController");
 const {
   listSchemas,
@@ -59,6 +64,8 @@ const {
   setUserSuspended,
   updateUserSubscription,
   recordOfflinePayment,
+  deleteUser,
+  bulkDeleteUsers,
 } = require("../controllers/adminUserController");
 const {
   listSubscriptions,
@@ -70,6 +77,7 @@ const {
   listAccessCodes,
   createAccessCodes,
   updateAccessCode,
+  deleteAccessCode,
 } = require("../controllers/adminAccessCodeController");
 const {
   listBookings: listAdminBookings,
@@ -87,6 +95,7 @@ const {
   listSupportMessages,
   getSupportMessage,
   updateSupportMessage,
+  deleteSupportMessage,
 } = require("../controllers/adminSupportController");
 const {
   getAppVersionConfig,
@@ -214,6 +223,18 @@ router.delete(
   adminMiddleware,
   deleteSupplyItem,
 );
+router.delete(
+  "/admin/v1/supply-items/:id/permanent",
+  authMiddleware,
+  adminMiddleware,
+  permanentlyDeleteSupplyItem,
+);
+router.post(
+  "/admin/v1/supply-items/:id/force-delete",
+  authMiddleware,
+  adminMiddleware,
+  forceDeleteSupplyItem,
+);
 
 router.get(
   "/admin/v1/service-types",
@@ -286,6 +307,13 @@ router.post(
 
 router.get("/admin/v1/users", authMiddleware, adminMiddleware, listUsers);
 router.get("/admin/v1/users/:id", authMiddleware, adminMiddleware, getUser);
+router.post(
+  "/admin/v1/users/bulk-delete",
+  authMiddleware,
+  adminMiddleware,
+  bulkDeleteUsers,
+);
+router.delete("/admin/v1/users/:id", authMiddleware, adminMiddleware, deleteUser);
 router.patch(
   "/admin/v1/users/:id/suspend",
   authMiddleware,
@@ -440,5 +468,26 @@ router.get("/admin/v1/logs", authMiddleware, adminMiddleware, listLogs);
 router.get("/admin/v1/reminders", authMiddleware, adminMiddleware, listEventReminders);
 router.post("/admin/v1/reminders/trigger", authMiddleware, adminMiddleware, triggerCron);
 router.post("/admin/v1/reminders/test/:bookingEventId", authMiddleware, adminMiddleware, testEventReminder);
+
+router.post(
+  "/admin/v1/menu-items/:id/force-delete",
+  authMiddleware,
+  adminMiddleware,
+  forceDeleteMenuItem,
+);
+router.delete(
+  "/admin/v1/extra-services/:id/permanent",
+  authMiddleware,
+  adminMiddleware,
+  permanentlyDeleteExtraService,
+);
+router.post(
+  "/admin/v1/extra-services/:id/force-delete",
+  authMiddleware,
+  adminMiddleware,
+  forceDeleteExtraService,
+);
+router.delete("/admin/v1/support/:id", authMiddleware, adminMiddleware, deleteSupportMessage);
+router.delete("/admin/v1/access-codes/:id", authMiddleware, adminMiddleware, deleteAccessCode);
 
 module.exports = router;

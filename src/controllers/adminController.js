@@ -4,6 +4,7 @@ const {
   getRequestedLanguage,
   resolveLocalizedName,
 } = require("../utils/localization");
+const { parsePaging, findPage, localizedNameMatcher } = require("../utils/adminListPaging");
 
 function formatAdminCategory(row, requestedLanguage = "en") {
   return {
@@ -87,6 +88,23 @@ exports.listMenuCategories = async (req, res) => {
     if (status === "active") where.isActive = true;
     if (status === "inactive") where.isActive = false;
 
+    const paging = parsePaging(req.query);
+    if (paging) {
+      const search = String(req.query.q ?? "").trim();
+      const { rows: pageRows, pagination } = await findPage(prisma.menuCategory, {
+        where,
+        orderBy: [{ sortOrder: "asc" }, { slug: "asc" }],
+        include: { _count: { select: { menuItems: true } } },
+        paging,
+        matches: search ? localizedNameMatcher(search, ["slug"]) : null,
+        matchSelect: { name: true, slug: true },
+      });
+      return successResponse(res, "Menu categories", {
+        categories: pageRows.map((row) => formatAdminCategory(row, requestedLanguage)),
+        pagination,
+      });
+    }
+
     const rows = await prisma.menuCategory.findMany({
       where,
       orderBy: [{ sortOrder: "asc" }, { slug: "asc" }],
@@ -125,6 +143,25 @@ exports.listSupplyCategories = async (req, res) => {
     const where = {};
     if (status === "active") where.isActive = true;
     if (status === "inactive") where.isActive = false;
+
+    const paging = parsePaging(req.query);
+    if (paging) {
+      const search = String(req.query.q ?? "").trim();
+      const { rows: pageRows, pagination } = await findPage(prisma.supplyItemCategory, {
+        where,
+        orderBy: [{ sortOrder: "asc" }, { slug: "asc" }, { id: "asc" }],
+        include: { _count: { select: { supplyItems: true } } },
+        paging,
+        matches: search ? localizedNameMatcher(search, ["slug"]) : null,
+        matchSelect: { name: true, slug: true },
+      });
+      return successResponse(res, "Supply categories", {
+        categories: pageRows.map((row) =>
+          formatAdminSupplyCategory(row, requestedLanguage),
+        ),
+        pagination,
+      });
+    }
 
     const rows = await prisma.supplyItemCategory.findMany({
       where,

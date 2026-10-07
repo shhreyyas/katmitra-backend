@@ -91,10 +91,10 @@ exports.createAccessCodes = async (req, res) => {
     const planType = String(req.body.plan_type ?? req.body.planType ?? "")
       .trim()
       .toUpperCase();
-    const count = Math.min(
-      100,
-      Math.max(1, parseInt(String(req.body.count ?? 1), 10) || 1),
-    );
+    const count = Number(req.body.count ?? 1);
+    if (!Number.isInteger(count) || count < 1 || count > 100) {
+      return errorResponse(res, "count must be a whole number from 1 to 100", 422, "VALIDATION_ERROR");
+    }
 
     if (!VALID_PLANS.has(planType)) {
       return errorResponse(
@@ -173,6 +173,29 @@ exports.updateAccessCode = async (req, res) => {
     return successResponse(res, "Access code updated", formatAccessCode(row));
   } catch (error) {
     console.error("updateAccessCode admin:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+/**
+ * DELETE /api/admin/v1/access-codes/:id
+ * Only codes nobody redeemed (unused or disabled). A used code is the record of
+ * how a caterer got their plan, so it is kept.
+ */
+exports.deleteAccessCode = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.accessCode.findUnique({ where: { id } });
+    if (!existing) {
+      return errorResponse(res, "Access code not found", 404, "NOT_FOUND");
+    }
+    if (existing.status === "used" || existing.usedAt || existing.assignedUserId) {
+      return errorResponse(res, "A code that has been used cannot be deleted", 409, "IN_USE");
+    }
+    await prisma.accessCode.delete({ where: { id } });
+    return successResponse(res, "Access code deleted", { id });
+  } catch (error) {
+    console.error("deleteAccessCode admin:", error.message);
     return errorResponse(res, "Server error", 500, "ERROR");
   }
 };

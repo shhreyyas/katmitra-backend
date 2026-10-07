@@ -1,11 +1,14 @@
 const prisma = require("../config/prisma");
 const { Prisma } = require("@prisma/client");
 const { successResponse, errorResponse } = require("../utils/response");
+const { getMenuItemUsage, describeUsage } = require("../utils/catalogUsage");
+const { logActivity } = require("../utils/activityLog");
 const {
   getRequestedLanguage,
   normalizeLocalizedName,
   resolveLocalizedName,
 } = require("../utils/localization");
+const { parsePaging, findPage, localizedNameMatcher } = require("../utils/adminListPaging");
 
 const FOOD_TYPES = new Set(["veg", "non_veg"]);
 
@@ -115,7 +118,7 @@ exports.listMenuItems = async (req, res) => {
     const foodType = String(req.query.food_type ?? "").trim();
     const search = String(req.query.q ?? req.query.search ?? "").trim();
 
-    const where = {};
+    const where = { deletedAt: null };
     if (scope === "global") {
       where.OR = [{ businessId: null }, { isGlobal: true }];
     } else if (scope === "business") {
@@ -125,6 +128,23 @@ exports.listMenuItems = async (req, res) => {
     }
     if (categorySlug) where.categorySlug = categorySlug;
     if (foodType && FOOD_TYPES.has(foodType)) where.foodType = foodType;
+
+    const paging = parsePaging(req.query);
+    if (paging) {
+      const { rows: pageRows, pagination } = await findPage(prisma.menuItem, {
+        where,
+        include: { category: true, business: { select: { id: true, name: true } } },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+        paging,
+        matches: search ? localizedNameMatcher(search) : null,
+        matchSelect: { name: true },
+      });
+      const usage = await getMenuItemUsage(pageRows.map((r) => r.id));
+      return successResponse(res, "Menu items", {
+        items: pageRows.map((r) => ({ ...formatAdminMenuItem(r, language), usage: usage.get(r.id) })),
+        pagination,
+      });
+    }
 
     let rows = await prisma.menuItem.findMany({
       where,
@@ -199,7 +219,12 @@ exports.createMenuItem = async (req, res) => {
 
     const ing = normalizeIngredients(ingredients);
     if (!hasValidIngredients(ing)) {
-      return errorResponse(res, "Invalid ingredients", 422, "VALIDATION_ERROR");
+      return errorResponse(
+        res,
+        "Each ingredient needs a name, and its quantity must be greater than 0",
+        422,
+        "VALIDATION_ERROR",
+      );
     }
 
     if (businessId) {
@@ -253,7 +278,7 @@ exports.updateMenuItem = async (req, res) => {
     const adminUserId = req.user.userId;
     const { id } = req.params;
 
-    const existing = await prisma.menuItem.findUnique({ where: { id } });
+    const existing = await prisma.menuItem.findFirst({ where: { id, deletedAt: null } });
     if (!existing) {
       return errorResponse(res, "Menu item not found", 404, "NOT_FOUND");
     }
@@ -303,7 +328,12 @@ exports.updateMenuItem = async (req, res) => {
     if (req.body.ingredients !== undefined) {
       const ing = normalizeIngredients(req.body.ingredients);
       if (!hasValidIngredients(ing)) {
-        return errorResponse(res, "Invalid ingredients", 422, "VALIDATION_ERROR");
+        return errorResponse(
+        res,
+        "Each ingredient needs a name, and its quantity must be greater than 0",
+        422,
+        "VALIDATION_ERROR",
+      );
       }
       updates.ingredients = ing;
     }
@@ -343,14 +373,14 @@ exports.updateMenuItem = async (req, res) => {
 exports.deleteMenuItem = async (req, res) => {
   try {
     const { id } = req.params;
-    const existing = await prisma.menuItem.findUnique({ where: { id } });
+    const existing = await prisma.menuItem.findFirst({ where: { id, deletedAt: null } });
     if (!existing) {
       return errorResponse(res, "Menu item not found", 404, "NOT_FOUND");
     }
 
     // Same onDelete: Restrict relations as menuController.js's deleteMenuItem
     // — a global item that's already been booked/quoted/added to a dish by
-    // any business can't be hard-deleted; steer the admin to deactivate it.
+    // any business can't be hard-deleted; the admin can force delete it instead.
     const [bookingUse, quotationUse, dishUse] = await Promise.all([
       prisma.bookingMenuItem.findFirst({ where: { menuItemId: id }, select: { id: true } }),
       prisma.quotationMenuItem.findFirst({ where: { menuItemId: id }, select: { id: true } }),
@@ -359,10 +389,10 @@ exports.deleteMenuItem = async (req, res) => {
     if (bookingUse || quotationUse || dishUse) {
       return errorResponse(
         res,
-        "This item is used in a booking, quotation, or dish. Deactivate it instead.",
+        "This item is used in a booking, quotation, or dish. Use force delete to remove it from the catalog without changing those.",
         422,
         "MENU_ITEM_IN_USE",
-        "This item is used in a booking, quotation, or dish. Deactivate it instead.",
+        "This item is used in a booking, quotation, or dish. Use force delete to remove it from the catalog without changing those.",
       );
     }
 
@@ -375,10 +405,10 @@ exports.deleteMenuItem = async (req, res) => {
       ) {
         return errorResponse(
           res,
-          "This item is used in a booking, quotation, or dish. Deactivate it instead.",
+          "This item is used in a booking, quotation, or dish. Use force delete to remove it from the catalog without changing those.",
           422,
           "MENU_ITEM_IN_USE",
-          "This item is used in a booking, quotation, or dish. Deactivate it instead.",
+          "This item is used in a booking, quotation, or dish. Use force delete to remove it from the catalog without changing those.",
         );
       }
       throw deleteError;
@@ -387,6 +417,38 @@ exports.deleteMenuItem = async (req, res) => {
     return successResponse(res, "Menu item deleted", { id });
   } catch (error) {
     console.error("deleteMenuItem admin:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+/**
+ * POST /api/admin/v1/menu-items/:id/force-delete
+ * Removes the item from the catalog and every picker while keeping the row, so
+ * bookings, quotations and dishes that already use it are unchanged.
+ */
+exports.forceDeleteMenuItem = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.menuItem.findFirst({ where: { id, deletedAt: null } });
+    if (!existing) {
+      return errorResponse(res, "Menu item not found", 404, "NOT_FOUND");
+    }
+    const usage = (await getMenuItemUsage([id])).get(id);
+    await prisma.menuItem.update({ where: { id }, data: { deletedAt: new Date() } });
+    const used = describeUsage(usage, {
+      bookings: ["booking", "bookings"],
+      quotations: ["quotation", "quotations"],
+      dishes: ["dish", "dishes"],
+    });
+    logActivity({
+      type: "menu_item_deleted",
+      message: `Menu item force deleted: ${existing.name?.en ?? id}${used ? ` (still referenced by ${used})` : ""}`,
+      actorUserId: req.user.userId,
+      meta: { menu_item_id: id, mode: "force", usage },
+    });
+    return successResponse(res, "Menu item deleted", { id, usage });
+  } catch (error) {
+    console.error("forceDeleteMenuItem admin:", error.message);
     return errorResponse(res, "Server error", 500, "ERROR");
   }
 };

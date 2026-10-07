@@ -5,6 +5,7 @@ const {
   normalizeLocalizedName,
   resolveLocalizedName,
 } = require("../utils/localization");
+const { parsePaging, findPage, localizedNameMatcher } = require("../utils/adminListPaging");
 
 function slugify(raw) {
   const s = String(raw ?? "")
@@ -64,6 +65,22 @@ exports.listServiceTypes = async (req, res) => {
     const where = {};
     if (statusFilter === "active") where.status = 1;
     if (statusFilter === "inactive") where.status = 0;
+
+    const paging = parsePaging(req.query);
+    if (paging) {
+      const { rows: pageRows, pagination } = await findPage(prisma.serviceType, {
+        where,
+        orderBy: { id: "asc" },
+        include: { _count: { select: { businesses: true } } },
+        paging,
+        matches: search ? localizedNameMatcher(search, ["slug"]) : null,
+        matchSelect: { name: true, slug: true },
+      });
+      return successResponse(res, "Service types", {
+        service_types: pageRows.map((r) => formatServiceType(r, language)),
+        pagination,
+      });
+    }
 
     let rows = await prisma.serviceType.findMany({
       where,
@@ -132,7 +149,12 @@ exports.createServiceType = async (req, res) => {
   } catch (error) {
     console.error("createServiceType admin:", error.message);
     if (error.code === "P2002") {
-      return errorResponse(res, "Service type slug already exists", 409, "DUPLICATE");
+      // P2002 on anything but `slug` (e.g. the id sequence lagging behind imported rows) is not a user error.
+      const target = [].concat(error.meta?.target ?? []).join(",");
+      if (!target || target.includes("slug")) {
+        return errorResponse(res, "Service type slug already exists", 409, "DUPLICATE");
+      }
+      console.error("createServiceType admin: unique violation on", target);
     }
     return errorResponse(res, "Server error", 500, "ERROR");
   }
@@ -200,7 +222,12 @@ exports.updateServiceType = async (req, res) => {
   } catch (error) {
     console.error("updateServiceType admin:", error.message);
     if (error.code === "P2002") {
-      return errorResponse(res, "Service type slug already exists", 409, "DUPLICATE");
+      // P2002 on anything but `slug` (e.g. the id sequence lagging behind imported rows) is not a user error.
+      const target = [].concat(error.meta?.target ?? []).join(",");
+      if (!target || target.includes("slug")) {
+        return errorResponse(res, "Service type slug already exists", 409, "DUPLICATE");
+      }
+      console.error("createServiceType admin: unique violation on", target);
     }
     return errorResponse(res, "Server error", 500, "ERROR");
   }

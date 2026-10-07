@@ -148,3 +148,19 @@ exports.updateSupportMessage = async (req, res) => {
     return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
+
+/** DELETE /api/admin/v1/support/:id — remove an inquiry (spam, tests, duplicates). */
+exports.deleteSupportMessage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.contactMessage.findUnique({ where: { id } });
+    if (!existing) {
+      return errorResponse(res, "Inquiry not found", 404, "NOT_FOUND");
+    }
+    await prisma.contactMessage.delete({ where: { id } });
+    return successResponse(res, "Inquiry deleted", { id });
+  } catch (error) {
+    console.error("deleteSupportMessage admin:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};

@@ -333,3 +333,133 @@ exports.recordOfflinePayment = async (req, res) => {
     return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
+
+const DELETE_CONFIRM_WORD = "DELETE";
+const BULK_DELETE_MAX = 50;
+/** Plans that are not a running paid subscription, so deleting the account loses no paid time. */
+const DELETABLE_PLANS = new Set(["FREE", "TRIAL", "EXPIRED"]);
+
+/**
+ * Permanently removes one caterer account. The business is removed with it
+ * (cascading to its bookings, quotations, menus, staff, vendors and billing
+ * rows) unless another user still belongs to that business.
+ * Returns `{ ok: true, ... }` or `{ ok: false, status, code, message }`.
+ */
+async function deleteCatererAccount(id, adminUserId) {
+  const user = await prisma.user.findUnique({
+    where: { id },
+    include: {
+      business: {
+        include: { users: { select: { id: true } }, _count: { select: { bookings: true, quotations: true } } },
+      },
+    },
+  });
+  if (!user) {
+    return { ok: false, status: 404, code: "NOT_FOUND", message: "User not found" };
+  }
+  if (user.role === "admin" || user.id === adminUserId) {
+    return { ok: false, status: 403, code: "FORBIDDEN", message: "Admin accounts cannot be deleted here" };
+  }
+
+  const business = user.business;
+  const plan = derivePlanLabel(business);
+  if (business && !DELETABLE_PLANS.has(plan)) {
+    return {
+      ok: false,
+      status: 409,
+      code: "ACTIVE_SUBSCRIPTION",
+      message: `${business.name || user.name} has an active ${plan} subscription. Cancel or expire it before deleting.`,
+    };
+  }
+
+  const removeBusiness = Boolean(business) && business.users.every((u) => u.id === user.id);
+
+  await prisma.$transaction(async (tx) => {
+    await tx.user.delete({ where: { id: user.id } });
+    if (removeBusiness) {
+      await tx.business.delete({ where: { id: business.id } });
+    }
+  });
+
+  logActivity({
+    type: "user_deleted",
+    message: `User deleted: ${user.name} <${user.email}>${
+      removeBusiness ? ` with business "${business.name ?? "—"}"` : ""
+    }`,
+    actorUserId: adminUserId,
+    meta: {
+      user_id: user.id,
+      email: user.email,
+      business_id: business?.id ?? null,
+      business_name: business?.name ?? null,
+      business_deleted: removeBusiness,
+      bookings: removeBusiness ? business._count.bookings : 0,
+      quotations: removeBusiness ? business._count.quotations : 0,
+    },
+  });
+
+  return { ok: true, id: user.id, name: user.name, business_deleted: removeBusiness };
+}
+
+/** DELETE /api/admin/v1/users/:id — body `{ confirm: "DELETE" }`. Permanent. */
+exports.deleteUser = async (req, res) => {
+  try {
+    if (req.body.confirm !== DELETE_CONFIRM_WORD) {
+      return errorResponse(res, `Type ${DELETE_CONFIRM_WORD} to confirm`, 422, "CONFIRMATION_REQUIRED");
+    }
+    const result = await deleteCatererAccount(req.params.id, req.user.userId);
+    if (!result.ok) {
+      return errorResponse(res, result.message, result.status, result.code);
+    }
+    return successResponse(res, "User deleted", {
+      id: result.id,
+      business_deleted: result.business_deleted,
+    });
+  } catch (error) {
+    console.error("deleteUser admin:", error.message);
+    return errorResponse(res, "Could not delete this user", 500, "ERROR");
+  }
+};
+
+/** POST /api/admin/v1/users/bulk-delete — body `{ ids: string[], confirm: "DELETE" }`. Permanent. */
+exports.bulkDeleteUsers = async (req, res) => {
+  try {
+    if (req.body.confirm !== DELETE_CONFIRM_WORD) {
+      return errorResponse(res, `Type ${DELETE_CONFIRM_WORD} to confirm`, 422, "CONFIRMATION_REQUIRED");
+    }
+    const ids = [...new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(String))].filter(Boolean);
+    if (!ids.length) {
+      return errorResponse(res, "Select at least one user", 422, "VALIDATION_ERROR");
+    }
+    if (ids.length > BULK_DELETE_MAX) {
+      return errorResponse(
+        res,
+        `Delete at most ${BULK_DELETE_MAX} users at a time`,
+        422,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const deleted = [];
+    const failed = [];
+    // One at a time: each account is its own transaction, so one failure doesn't undo the others.
+    for (const id of ids) {
+      try {
+        const result = await deleteCatererAccount(id, req.user.userId);
+        if (result.ok) deleted.push({ id: result.id, name: result.name });
+        else failed.push({ id, code: result.code, message: result.message });
+      } catch (error) {
+        console.error("bulkDeleteUsers admin:", id, error.message);
+        failed.push({ id, code: "ERROR", message: "Could not delete this user" });
+      }
+    }
+
+    return successResponse(res, `Deleted ${deleted.length} of ${ids.length} users`, {
+      deleted,
+      failed,
+    });
+  } catch (error) {
+    console.error("bulkDeleteUsers admin:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};

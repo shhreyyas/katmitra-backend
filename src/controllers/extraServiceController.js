@@ -193,7 +193,10 @@ async function listExtraServices(req, res) {
       req.query.active_only === "1" ||
       req.query.active_only === "true" ||
       req.query.active === "true";
-    const filterAnd = [{ OR: extraServiceVisibilityOrBranches(businessId, userId) }];
+    const filterAnd = [
+      { OR: extraServiceVisibilityOrBranches(businessId, userId) },
+      { deletedAt: null },
+    ];
     if (activeOnly) filterAnd.push({ isActive: true });
     const rows = await prisma.extraService.findMany({
       where: { AND: filterAnd },
@@ -247,7 +250,7 @@ async function updateExtraService(req, res) {
     const businessId = req.businessId;
     const id = req.params.id;
     const existing = await prisma.extraService.findFirst({
-      where: { id, businessId },
+      where: { id, businessId, deletedAt: null },
     });
     if (!existing) {
       return errorResponse(res, "Extra service not found", 404, "NOT_FOUND");
@@ -289,7 +292,7 @@ async function deleteExtraService(req, res) {
     const businessId = req.businessId;
     const id = req.params.id;
     const existing = await prisma.extraService.findFirst({
-      where: { id, businessId },
+      where: { id, businessId, deletedAt: null },
     });
     if (!existing) {
       return errorResponse(res, "Extra service not found", 404, "NOT_FOUND");

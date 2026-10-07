@@ -183,12 +183,15 @@ function cell(row, mapping, key) {
   return String(row[col] ?? "").trim();
 }
 
+/** All three names are required, matching the admin "Add" dialogs; returns null when any is missing. */
 function localizedFromRow(row, mapping) {
-  return normalizeLocalizedName({
+  const names = {
     en: cell(row, mapping, "name_en"),
     hi: cell(row, mapping, "name_hi"),
     gu: cell(row, mapping, "name_gu"),
-  });
+  };
+  if (!names.en || !names.hi || !names.gu) return null;
+  return normalizeLocalizedName(names);
 }
 
 function parseBool(raw, defaultValue = true) {
@@ -196,8 +199,9 @@ function parseBool(raw, defaultValue = true) {
     .trim()
     .toLowerCase();
   if (!s) return defaultValue;
-  if (["0", "false", "no", "inactive"].includes(s)) return false;
-  return true;
+  if (["0", "false", "no", "n", "inactive"].includes(s)) return false;
+  if (["1", "true", "yes", "y", "active"].includes(s)) return true;
+  throw new Error(`Unrecognised true/false value: "${raw}"`);
 }
 
 function parseScope(row, mapping) {
@@ -360,7 +364,7 @@ async function importMenuItems(rows, mapping, options, adminUserId) {
     const row = rows[i];
     try {
       const name = localizedFromRow(row, mapping);
-      if (!name) throw new Error("Localized names are required");
+      if (!name) throw new Error("name_en, name_hi, and name_gu are required");
 
       const categorySlug = cell(row, mapping, "category_slug").toLowerCase();
       if (!categorySlug) throw new Error("category_slug is required");
@@ -433,7 +437,7 @@ async function importSupplyItems(rows, mapping, options, adminUserId) {
     const row = rows[i];
     try {
       const name = localizedFromRow(row, mapping);
-      if (!name) throw new Error("Localized names are required");
+      if (!name) throw new Error("name_en, name_hi, and name_gu are required");
 
       const type = normalizeSupplyType(cell(row, mapping, "type"));
       if (!type) throw new Error("type must be INGREDIENT or UTENSIL");
@@ -467,6 +471,7 @@ async function importSupplyItems(rows, mapping, options, adminUserId) {
       if (skipDupes) {
         const dup = await prisma.supplyItem.findFirst({
           where: {
+            deletedAt: null,
             categorySlug,
             type,
             name: { path: ["en"], equals: name.en },

@@ -255,6 +255,10 @@ model AppSettings {
 
   defaultServiceChargePct Decimal @default(10) @db.Decimal(5, 2)
   defaultTaxPct           Decimal @default(5) @db.Decimal(5, 2)
+
+  /// Store listing links shown on the marketing site (badges, QR code, /download redirect). Empty = not published.
+  androidAppUrl String @default("")
+  iosAppUrl     String @default("")
 }
 
 /// Per-platform mobile app version gates (admin-managed; env vars are fallback).
@@ -311,6 +315,9 @@ model MenuItem {
   bookingMenuItems   BookingMenuItem[]
   quotationMenuItems QuotationMenuItem[]
   dishMenuItems      DishMenuItem[]
+  /// Set by admin "force delete": hidden from the catalog and pickers, but the row stays so
+  /// bookings, quotations and dishes that already reference it keep resolving it.
+  deletedAt          DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -560,6 +567,9 @@ model SupplyItem {
   damagedCount    Int                @default(0)
   photoUrl        String?
   isActive        Boolean            @default(true)
+  /// Set by admin "force delete": hidden from the catalog and pickers, but the row stays so
+  /// bookings and saved lists that already reference it keep resolving its name and unit.
+  deletedAt       DateTime?
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
 
@@ -834,11 +844,11 @@ model SupplySavedList {
   updatedAt       DateTime              @updatedAt
   items           SupplySavedListItem[]
 
+  /// At most one order list per booking (NULL bookingIds don't collide).
+  @@unique([businessId, bookingId])
   @@index([businessId, createdAt(sort: Desc)])
   @@index([bookingEventId])
   @@index([bookingId])
-  /// At most one order list per booking (NULL bookingIds don't collide).
-  @@unique([businessId, bookingId])
 }
 
 model SupplySavedListItem {
@@ -923,6 +933,9 @@ model ExtraService {
   price           Decimal                     @db.Decimal(12, 2)
   isOptional      Boolean                     @default(true)
   isActive        Boolean                     @default(true)
+  /// Set by admin "force delete": hidden from the catalog and pickers, but the row stays so
+  /// bookings, quotations and dishes that already reference it keep resolving it.
+  deletedAt       DateTime?
   createdAt       DateTime                    @default(now())
   updatedAt       DateTime                    @updatedAt
   bookingLines    BookingExtraServiceLine[]

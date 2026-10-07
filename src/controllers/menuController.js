@@ -635,10 +635,8 @@ exports.listMenuItems = async (req, res) => {
       filterAnd.push({ OR: searchOr });
     }
 
-    const where =
-      filterAnd.length > 0
-        ? { AND: [{ OR: orBranches }, ...filterAnd] }
-        : { OR: orBranches };
+    // Admin force-deleted items stay in the table for existing bookings but are no longer offered.
+    const where = { AND: [{ OR: orBranches }, { deletedAt: null }, ...filterAnd] };
 
     const [totalRecord, rows] = await Promise.all([
       prisma.menuItem.count({ where }),

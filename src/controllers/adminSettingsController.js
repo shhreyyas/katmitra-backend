@@ -12,8 +12,32 @@ function formatSettings(row) {
     payment_bank: row.paymentBank,
     default_service_charge_pct: Number(row.defaultServiceChargePct ?? 10),
     default_tax_pct: Number(row.defaultTaxPct ?? 5),
+    android_app_url: row.androidAppUrl ?? "",
+    ios_app_url: row.iosAppUrl ?? "",
     updated_at: row.updatedAt.toISOString(),
   };
+}
+
+/**
+ * The marketing site redirects visitors to these links, so only genuine store
+ * listing URLs are accepted — never an arbitrary address.
+ */
+const STORE_HOSTS = {
+  android: ["play.google.com"],
+  ios: ["apps.apple.com", "itunes.apple.com"],
+};
+
+/** Returns the cleaned URL, "" when blank, or null when it is not a valid store link. */
+function parseStoreUrl(raw, platform) {
+  const value = String(raw ?? "").trim();
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || !STORE_HOSTS[platform].includes(url.hostname)) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 async function ensureSettings() {
@@ -92,6 +116,32 @@ exports.updateSettings = async (req, res) => {
       data.defaultTaxPct = txp;
     }
 
+    if (body.android_app_url !== undefined) {
+      const url = parseStoreUrl(body.android_app_url, "android");
+      if (url === null) {
+        return errorResponse(
+          res,
+          "Android link must be a Google Play address (https://play.google.com/...)",
+          422,
+          "VALIDATION_ERROR",
+        );
+      }
+      data.androidAppUrl = url;
+    }
+
+    if (body.ios_app_url !== undefined) {
+      const url = parseStoreUrl(body.ios_app_url, "ios");
+      if (url === null) {
+        return errorResponse(
+          res,
+          "iOS link must be an App Store address (https://apps.apple.com/...)",
+          422,
+          "VALIDATION_ERROR",
+        );
+      }
+      data.iosAppUrl = url;
+    }
+
     if (Object.keys(data).length === 0) {
       return errorResponse(res, "No settings fields to update", 422, "VALIDATION_ERROR");
     }
@@ -105,6 +155,21 @@ exports.updateSettings = async (req, res) => {
     return successResponse(res, "Settings updated", { settings: formatSettings(row) });
   } catch (error) {
     console.error("updateSettings admin:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+/** GET /api/v1/app-links — public; the marketing site's download badges, QR code and /download redirect. */
+exports.getPublicAppLinks = async (req, res) => {
+  try {
+    const row = await ensureSettings();
+    res.set("Cache-Control", "public, max-age=300");
+    return successResponse(res, "App links", {
+      android_url: row.androidAppUrl || null,
+      ios_url: row.iosAppUrl || null,
+    });
+  } catch (error) {
+    console.error("getPublicAppLinks:", error.message);
     return errorResponse(res, "Server error", 500, "ERROR");
   }
 };

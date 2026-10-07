@@ -1,6 +1,9 @@
 const { Prisma } = require("@prisma/client");
 const prisma = require("../config/prisma");
 const { successResponse, errorResponse } = require("../utils/response");
+const { getExtraServiceUsage, describeUsage } = require("../utils/catalogUsage");
+const { logActivity } = require("../utils/activityLog");
+const { parsePaging, findPage } = require("../utils/adminListPaging");
 
 const PRICING_TYPES = new Set(["FIXED", "PER_UNIT", "PER_GUEST"]);
 
@@ -56,7 +59,7 @@ exports.listExtraServices = async (req, res) => {
     const status = String(req.query.status ?? "all").toLowerCase();
     const search = String(req.query.q ?? req.query.search ?? "").trim();
 
-    const where = {};
+    const where = { deletedAt: null };
     if (scope === "global") {
       where.OR = [{ businessId: null }, { isGlobal: true }];
     } else if (scope === "business") {
@@ -67,6 +70,31 @@ exports.listExtraServices = async (req, res) => {
     if (PRICING_TYPES.has(pricingType)) where.pricingType = pricingType;
     if (status === "active") where.isActive = true;
     if (status === "inactive") where.isActive = false;
+
+    const paging = parsePaging(req.query);
+    if (paging) {
+      if (search) {
+        where.AND = [
+          {
+            OR: [
+              { title: { contains: search, mode: "insensitive" } },
+              { description: { contains: search, mode: "insensitive" } },
+            ],
+          },
+        ];
+      }
+      const { rows: pageRows, pagination } = await findPage(prisma.extraService, {
+        where,
+        include: { business: { select: { id: true, name: true } } },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+        paging,
+      });
+      const usage = await getExtraServiceUsage(pageRows.map((r) => r.id));
+      return successResponse(res, "Extra services", {
+        items: pageRows.map((r) => ({ ...formatAdminExtraService(r), usage: usage.get(r.id) })),
+        pagination,
+      });
+    }
 
     let rows = await prisma.extraService.findMany({
       where,
@@ -164,7 +192,7 @@ exports.updateExtraService = async (req, res) => {
     const adminUserId = req.user.userId;
     const { id } = req.params;
 
-    const existing = await prisma.extraService.findUnique({ where: { id } });
+    const existing = await prisma.extraService.findFirst({ where: { id, deletedAt: null } });
     if (!existing) {
       return errorResponse(res, "Extra service not found", 404, "NOT_FOUND");
     }
@@ -233,7 +261,7 @@ exports.updateExtraService = async (req, res) => {
 exports.deleteExtraService = async (req, res) => {
   try {
     const { id } = req.params;
-    const existing = await prisma.extraService.findUnique({ where: { id } });
+    const existing = await prisma.extraService.findFirst({ where: { id, deletedAt: null } });
     if (!existing) {
       return errorResponse(res, "Extra service not found", 404, "NOT_FOUND");
     }
@@ -244,6 +272,76 @@ exports.deleteExtraService = async (req, res) => {
     return successResponse(res, "Extra service deactivated", { id });
   } catch (error) {
     console.error("deleteExtraService admin:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+const EXTRA_SERVICE_USAGE_LABELS = {
+  bookings: ["booking", "bookings"],
+  quotations: ["quotation", "quotations"],
+};
+
+/**
+ * DELETE /api/admin/v1/extra-services/:id/permanent
+ * Removes the row for good. Only allowed while no booking or quotation uses it.
+ */
+exports.permanentlyDeleteExtraService = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.extraService.findFirst({ where: { id, deletedAt: null } });
+    if (!existing) {
+      return errorResponse(res, "Extra service not found", 404, "NOT_FOUND");
+    }
+    const usage = (await getExtraServiceUsage([id])).get(id);
+    if (usage.total > 0) {
+      return errorResponse(
+        res,
+        `This service is used in ${describeUsage(usage, EXTRA_SERVICE_USAGE_LABELS)}. Use force delete to remove it from the catalog without changing those.`,
+        409,
+        "IN_USE",
+      );
+    }
+    await prisma.extraService.delete({ where: { id } });
+    logActivity({
+      type: "extra_service_deleted",
+      message: `Extra service deleted: ${existing.title}`,
+      actorUserId: req.user.userId,
+      meta: { extra_service_id: id, mode: "permanent" },
+    });
+    return successResponse(res, "Extra service deleted", { id });
+  } catch (error) {
+    console.error("permanentlyDeleteExtraService admin:", error.message);
+    if (error.code === "P2003") {
+      return errorResponse(res, "This service is still in use and cannot be deleted", 409, "IN_USE");
+    }
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+/**
+ * POST /api/admin/v1/extra-services/:id/force-delete
+ * Removes the service from the catalog and pickers while keeping the row, so
+ * bookings and quotations that already include it are unchanged.
+ */
+exports.forceDeleteExtraService = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.extraService.findFirst({ where: { id, deletedAt: null } });
+    if (!existing) {
+      return errorResponse(res, "Extra service not found", 404, "NOT_FOUND");
+    }
+    const usage = (await getExtraServiceUsage([id])).get(id);
+    await prisma.extraService.update({ where: { id }, data: { deletedAt: new Date() } });
+    const used = describeUsage(usage, EXTRA_SERVICE_USAGE_LABELS);
+    logActivity({
+      type: "extra_service_deleted",
+      message: `Extra service force deleted: ${existing.title}${used ? ` (still referenced by ${used})` : ""}`,
+      actorUserId: req.user.userId,
+      meta: { extra_service_id: id, mode: "force", usage },
+    });
+    return successResponse(res, "Extra service deleted", { id, usage });
+  } catch (error) {
+    console.error("forceDeleteExtraService admin:", error.message);
     return errorResponse(res, "Server error", 500, "ERROR");
   }
 };

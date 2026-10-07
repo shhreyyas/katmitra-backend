@@ -61,6 +61,7 @@ async function findDuplicateSupplyItem({ businessId, userId, categorySlug, names
   const rows = await prisma.supplyItem.findMany({
     where: {
       isActive: true,
+      deletedAt: null,
       categorySlug,
       OR: supplyVisibilityOrBranches(businessId, userId),
       ...(excludeId ? { NOT: { id: excludeId } } : {}),
@@ -169,6 +170,7 @@ async function listSupplyItemCategories(req, res) {
           AND: [
             { type },
             { isActive: true },
+            { deletedAt: null },
             { OR: supplyVisibilityOrBranches(businessId, userId) },
           ],
         },
@@ -377,7 +379,7 @@ async function listSupplyItems(req, res) {
     }
 
     const visibilityWhere = {
-      AND: [{ OR: supplyVisibilityOrBranches(businessId, userId) }, ...filterAnd],
+      AND: [{ OR: supplyVisibilityOrBranches(businessId, userId) }, { deletedAt: null }, ...filterAnd],
     };
 
     if (!q) {
@@ -426,6 +428,7 @@ async function updateSupplyItem(req, res) {
       where: {
         id,
         isActive: true,
+        deletedAt: null,
         OR: supplyVisibilityOrBranches(businessId, userId),
       },
       include: { category: true },
@@ -569,6 +572,7 @@ async function deleteSupplyItem(req, res) {
       where: {
         id,
         isActive: true,
+        deletedAt: null,
         OR: supplyVisibilityOrBranches(businessId, userId),
       },
       select: { id: true },
@@ -2672,6 +2676,7 @@ async function getUtensilsInventory(req, res) {
       AND: [
         { OR: supplyVisibilityOrBranches(businessId, userId) },
         { isActive: true },
+        { deletedAt: null },
         { type: "UTENSIL" },
       ],
     };
@@ -2748,6 +2753,7 @@ async function getUtensilInventoryDetail(req, res) {
         id,
         type: "UTENSIL",
         isActive: true,
+        deletedAt: null,
         OR: supplyVisibilityOrBranches(businessId, userId),
       },
       include: { category: true },

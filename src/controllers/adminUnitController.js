@@ -1,5 +1,6 @@
 const prisma = require("../config/prisma");
 const { successResponse, errorResponse } = require("../utils/response");
+const { parsePaging, findPage } = require("../utils/adminListPaging");
 
 function slugify(raw) {
   const s = String(raw ?? "")
@@ -9,6 +10,16 @@ function slugify(raw) {
     .replace(/[\s_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return s || "unit";
+}
+
+function findUnitByName(name, excludeId) {
+  return prisma.unit.findFirst({
+    where: {
+      name: { equals: name, mode: "insensitive" },
+      ...(excludeId ? { NOT: { id: excludeId } } : {}),
+    },
+    select: { id: true },
+  });
 }
 
 async function ensureUniqueSlug(base, excludeId) {
@@ -48,6 +59,16 @@ exports.listUnits = async (req, res) => {
           ],
         }
       : {};
+    const paging = parsePaging(req.query);
+    if (paging) {
+      const { rows: pageRows, pagination } = await findPage(prisma.unit, {
+        where,
+        orderBy: [{ name: "asc" }, { id: "asc" }],
+        paging,
+      });
+      return successResponse(res, "Units", { units: pageRows.map(formatUnit), pagination });
+    }
+
     const rows = await prisma.unit.findMany({
       where,
       orderBy: [{ name: "asc" }],
@@ -68,6 +89,9 @@ exports.createUnit = async (req, res) => {
     const name = String(req.body.name ?? "").trim();
     if (!name) {
       return errorResponse(res, "name is required", 422, "VALIDATION_ERROR");
+    }
+    if (await findUnitByName(name)) {
+      return errorResponse(res, "A unit with this name already exists", 409, "DUPLICATE");
     }
     const slugInput = req.body.slug != null ? String(req.body.slug).trim() : "";
     const slug = await ensureUniqueSlug(slugInput || name);
@@ -99,6 +123,9 @@ exports.updateUnit = async (req, res) => {
       const name = String(req.body.name).trim();
       if (!name) {
         return errorResponse(res, "name is required", 422, "VALIDATION_ERROR");
+      }
+      if (await findUnitByName(name, id)) {
+        return errorResponse(res, "A unit with this name already exists", 409, "DUPLICATE");
       }
       data.name = name;
     }
