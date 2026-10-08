@@ -15,6 +15,16 @@ const validatePassword = (password) => {
   return regex.test(password);
 };
 
+/** Device type the web admin panel signs in with (not iOS/Android). */
+const ADMIN_WEB_DEVICE_TYPE = 3;
+/** Admin panel tokens expire; mobile app tokens do not (they end only on displacement). */
+const ADMIN_WEB_TOKEN_TTL = "12h";
+
+const signInTokenOptions = (role, deviceType) =>
+  role === "admin" && Number(deviceType) === ADMIN_WEB_DEVICE_TYPE
+    ? { expiresIn: ADMIN_WEB_TOKEN_TTL }
+    : {};
+
 /** 1 if a non-empty device_token is provided, otherwise 0 */
 function notificationStatusFromDeviceToken(device_token) {
   return device_token != null && String(device_token).trim() !== "" ? 1 : 0;
@@ -404,7 +414,7 @@ exports.signIn = async (req, res) => {
           sessionVersion: updatedUnverified.sessionVersion,
         },
         process.env.JWT_SECRET,
-        {},
+        signInTokenOptions(updatedUnverified.role, device_type),
       );
 
       const formattedUser = formatUserResponse(updatedUnverified, {
@@ -448,7 +458,7 @@ exports.signIn = async (req, res) => {
         sessionVersion: updatedUser.sessionVersion,
       },
       process.env.JWT_SECRET,
-      {},
+      signInTokenOptions(updatedUser.role, device_type),
     );
 
     const formattedUser = formatUserResponse(updatedUser, {
@@ -781,6 +791,8 @@ exports.updateUserProfile = async (req, res) => {
         businessId: updated.businessId,
         role: updated.role,
         sessionVersion: req.user.sessionVersion,
+        // Carry over the caller's expiry so re-issuing never extends an expiring (admin) session.
+        ...(req.user.exp ? { exp: req.user.exp } : {}),
       },
       process.env.JWT_SECRET,
       {},
