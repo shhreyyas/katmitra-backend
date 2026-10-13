@@ -1,13 +1,18 @@
 const prisma = require("../config/prisma");
 const { successResponse, errorResponse } = require("../utils/response");
+const { getRequestedLanguage } = require("../utils/localization");
+const { localizeStoredNotification } = require("../utils/notificationTranslations");
 
-function formatNotification(row) {
+function formatNotification(row, lang) {
+  const { title, body } = localizeStoredNotification(row, lang);
+  // `i18n` is only for re-rendering here; the app gets the deep-link fields.
+  const { i18n: _i18n, ...data } = row.data && typeof row.data === "object" ? row.data : {};
   return {
     id: row.id,
-    title: row.title,
-    body: row.body,
+    title,
+    body,
     type: row.type,
-    data: row.data ?? {},
+    data,
     is_read: row.isRead,
     read_at: row.readAt ? row.readAt.toISOString() : null,
     created_at: row.createdAt.toISOString(),
@@ -18,6 +23,7 @@ function formatNotification(row) {
 exports.listNotifications = async (req, res) => {
   try {
     const userId = req.user.userId;
+    const lang = getRequestedLanguage(req);
     const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
     const limit = Math.min(
       50,
@@ -37,7 +43,7 @@ exports.listNotifications = async (req, res) => {
     ]);
 
     return successResponse(res, "Notifications", {
-      notifications: rows.map(formatNotification),
+      notifications: rows.map((row) => formatNotification(row, lang)),
       unread_count: unreadCount,
       pagination: {
         page,

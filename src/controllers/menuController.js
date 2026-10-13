@@ -1090,7 +1090,9 @@ exports.deleteMenuItem = async (req, res) => {
     }
 
     const dgDel = deriveIsGlobal(menu.businessId, menu.createdByUserId);
-    if (dgDel && menu.createdByUserId != null) {
+    // Every global (catalogue) item is shared by all businesses, including the
+    // seeded ones that have no creator — none may be deleted from the app.
+    if (dgDel) {
       return errorResponse(
         res,
         "You do not have permission to delete this item.",

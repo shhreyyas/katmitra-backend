@@ -69,7 +69,8 @@ function earliestQuotationEventDate(quotation) {
 }
 
 /**
- * True once a quotation's validity window has passed: 2 days before its earliest event,
+ * True once a quotation's validity window has passed: 2 days before its earliest event
+ * (or the event itself, when the quotation was issued less than 2 days before it),
  * or 30 days after it was issued when no event date is set. Mirrors the app's PDF expiry
  * label (`formatQuotationPdfExpiresTwoDaysBeforeEvent` in quotationPdf.ts) so the two never
  * disagree. An ACCEPTED quotation is never expired — it has already become a Booking.
@@ -81,7 +82,11 @@ function isQuotationExpired(quotation) {
   const eventDate = earliestQuotationEventDate(quotation);
   const expiry =
     eventDate != null
-      ? new Date(Math.max(eventDate.getTime() - QUOTATION_EXPIRY_LEAD_MS, issuedSafe.getTime()))
+      ? // Issued inside the 2-day window: stay valid until the event starts,
+        // otherwise the quotation would be expired the moment it is created.
+        eventDate.getTime() - QUOTATION_EXPIRY_LEAD_MS < issuedSafe.getTime()
+        ? eventDate
+        : new Date(eventDate.getTime() - QUOTATION_EXPIRY_LEAD_MS)
       : new Date(issuedSafe.getTime() + QUOTATION_EXPIRY_FALLBACK_MS);
   return Date.now() > expiry.getTime();
 }

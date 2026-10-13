@@ -1,5 +1,6 @@
 const prisma = require("../config/prisma");
 const { successResponse, errorResponse } = require("../utils/response");
+const { normalizeOptionalPhone } = require("../utils/validators");
 
 const STAFF_ROLES = new Set([
   "CHEF",
@@ -122,11 +123,15 @@ async function createStaff(req, res) {
     if (!STAFF_STATUSES.has(status)) {
       return errorResponse(res, "Invalid status", 200, "VALIDATION_ERROR");
     }
+    const phone = normalizeOptionalPhone(body.phone);
+    if (phone === null) {
+      return errorResponse(res, "Phone must be a 10-digit number", 200, "VALIDATION_ERROR");
+    }
     const row = await prisma.staff.create({
       data: {
         businessId,
         name,
-        phone: body.phone ? String(body.phone).trim() : null,
+        phone: phone || null,
         role,
         dailyCharge:
           body.daily_charge != null
@@ -164,7 +169,11 @@ async function updateStaff(req, res) {
       data.name = name;
     }
     if (body.phone !== undefined) {
-      data.phone = body.phone ? String(body.phone).trim() : null;
+      const phone = normalizeOptionalPhone(body.phone);
+      if (phone === null) {
+        return errorResponse(res, "Phone must be a 10-digit number", 200, "VALIDATION_ERROR");
+      }
+      data.phone = phone || null;
     }
     if (body.role !== undefined) {
       const role = String(body.role).toUpperCase();

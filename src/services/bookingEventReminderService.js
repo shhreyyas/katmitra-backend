@@ -108,6 +108,7 @@ async function _sendBookingNoEventsReminder(booking, users) {
       }),
       notifData,
       "booking_no_events",
+      { id: "bookingNoEvents", raw: { customerName: booking.customerName ?? null } },
     );
   } catch (err) {
     console.error(`[BookingNoEvents] sendGroupedNotification threw for booking ${booking.id}:`, err.message);

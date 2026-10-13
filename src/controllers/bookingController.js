@@ -270,6 +270,33 @@ function resolveTotalDueForPayment(booking) {
   return stored;
 }
 
+/**
+ * A confirmed booking stores its total (`totalDue`) at confirmation time. Its
+ * events can still be added, edited (guest count, plate price) or removed
+ * afterwards, so re-derive the stored total and payment status from the
+ * events whenever one changes — otherwise Payments and the dashboard keep
+ * showing the old amount. Returns the freshly loaded booking either way.
+ */
+async function refreshConfirmedBookingTotals(bookingId, businessId) {
+  const booking = await loadBookingForBusiness(bookingId, businessId, {
+    includePayments: true,
+  });
+  if (!booking || booking.status !== "CONFIRMED" || booking.completedAt) return booking;
+  const totalDue = computeBookingTotalDueFromEvents(booking);
+  // Older bookings can carry a stored total while their events have no price
+  // of their own; never replace that with 0.
+  if (totalDue <= 0 && (booking.events || []).length > 0) return booking;
+  if (Math.abs(totalDue - num(booking.totalDue)) < 0.005) return booking;
+  await prisma.booking.update({
+    where: { id: bookingId },
+    data: {
+      totalDue: new Prisma.Decimal(String(totalDue)),
+      paymentStatus: paymentStatusFromAmounts(booking.amountPaid, totalDue),
+    },
+  });
+  return loadBookingForBusiness(bookingId, businessId, { includePayments: true });
+}
+
 // Selectable options: breakfast, lunch, dinner.
 const JAMANVAR_SLUGS = new Set([
   "breakfast",
@@ -1217,6 +1244,18 @@ async function patchBooking(req, res) {
       taxAmount: pricing.taxAmount,
       discountAmount: discount,
     };
+    const totalBeforeDiscount = computeBookingTotalDueFromEvents({
+      ...dueBasis,
+      discountAmount: 0,
+    });
+    if (totalBeforeDiscount > 0 && discount > totalBeforeDiscount) {
+      return errorResponse(
+        res,
+        "Discount cannot be more than the booking amount",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
     const totalFromEvents = computeBookingTotalDueFromEvents(dueBasis);
     if (totalFromEvents > 0) {
       pricing = { ...pricing, totalDue: totalFromEvents };
@@ -1385,9 +1424,7 @@ async function updateEvent(req, res) {
       });
     }
 
-    const updated = await loadBookingForBusiness(bookingId, businessId, {
-      includePayments: true,
-    });
+    const updated = await refreshConfirmedBookingTotals(bookingId, businessId);
     syncOrderSupplyListInBackground(req, bookingId);
     return successResponse(res, "Event updated", serializeBooking(updated));
   } catch (e) {
@@ -1530,7 +1567,10 @@ async function createEvent(req, res) {
         jamanvarType: jamanvarTypeFromEventBody(body, null),
         guestCount: body.guest_count != null ? parseInt(body.guest_count, 10) : null,
         notes: body.notes ?? null,
-        status: body.status ?? "PENDING",
+        // Events are confirmed together with their booking, so one added to an
+        // already-confirmed booking starts out confirmed too.
+        status:
+          existing.status === "CONFIRMED" ? "CONFIRMED" : body.status ?? "PENDING",
         dishId: body.dish_id ?? null,
         parentDishId: body.parent_dish_id ?? null,
         isTemplate: body.is_template ?? null,
@@ -1549,9 +1589,7 @@ async function createEvent(req, res) {
       });
     }
 
-    const updated = await loadBookingForBusiness(bookingId, businessId, {
-      includePayments: true,
-    });
+    const updated = await refreshConfirmedBookingTotals(bookingId, businessId);
     syncOrderSupplyListInBackground(req, bookingId);
     return successResponse(res, "Event created", serializeBooking(updated));
   } catch (e) {
@@ -1595,9 +1633,7 @@ async function deleteEvent(req, res) {
 
     await prisma.bookingEvent.delete({ where: { id: eventId } });
 
-    const updated = await loadBookingForBusiness(bookingId, businessId, {
-      includePayments: true,
-    });
+    const updated = await refreshConfirmedBookingTotals(bookingId, businessId);
     syncOrderSupplyListInBackground(req, bookingId);
     return successResponse(res, "Event deleted", serializeBooking(updated));
   } catch (e) {
@@ -2408,13 +2444,28 @@ async function confirmBooking(req, res) {
 
       const menuRows = await tx.bookingMenuItem.findMany({ where: { bookingId } });
       const guests = existing.guestCount ?? 0;
-      const pricing = computePricingFromSnapshots(
+      let pricing = computePricingFromSnapshots(
         menuRows,
         guests,
         num(existing.discountAmount),
         num(existing.serviceChargePct),
         num(existing.taxPct),
       );
+
+      // Bookings built event-by-event carry their prices on the events (and
+      // extra service lines), with no booking-level menu rows — so the
+      // snapshot pricing above is 0 for them. Use the event-derived total, the
+      // same one the draft was saved with, instead of overwriting it with 0.
+      const extraServiceLines = await tx.bookingExtraServiceLine.findMany({
+        where: { bookingId },
+      });
+      const totalFromEvents = computeBookingTotalDueFromEvents({
+        ...existing,
+        extraServiceLines,
+      });
+      if (totalFromEvents > 0) {
+        pricing = { ...pricing, totalDue: totalFromEvents };
+      }
 
       // Confirming the booking confirms every one of its events too — there's
       // no separate per-event confirmation step, so this is the one place

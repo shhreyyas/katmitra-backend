@@ -22,7 +22,7 @@
 
 const prisma = require("../config/prisma");
 const { sendGroupedNotification } = require("../utils/notificationLocalization");
-const { getNotificationContent, buildForSuffix, buildEventDatePhrase } = require("../utils/notificationTranslations");
+const { renderNotification } = require("../utils/notificationTranslations");
 
 // Minutes ahead of the event each reminder fires.
 // windowMinutes MUST match the cron interval to avoid gaps or double-sends.
@@ -74,28 +74,27 @@ function formatDateLongIST(date) {
  *   Venue: Padmavat Society, Paldi
  *   Guests: 150
  */
-function buildNotificationContent(event, reminderType, lang) {
+/** Language-independent values behind an event reminder (see `renderNotification`). */
+function buildReminderRawParams(event, reminderType) {
   const eventDate = event.eventAt ? new Date(event.eventAt) : null;
-  const eventType = event.functionType || "Event";
-  const forSuffix = buildForSuffix(lang, event.booking.customerName);
-  const timeStr   = eventDate ? formatTimeIST(eventDate) : "";
-
-  const datePhrase = eventDate
-    ? buildEventDatePhrase(lang, {
-        reminderType,
-        isTomorrow:  reminderType === "24_HOUR" && isTomorrowIST(eventDate),
-        timeStr,
-        longDateStr: formatDateLongIST(eventDate),
-      })
-    : "";
-
-  return getNotificationContent("eventReminder", lang, {
-    eventType,
-    forSuffix,
-    datePhrase,
-    venue:  event.eventLocation || event.booking.customerAddress || null,
+  return {
+    eventType: event.functionType || "Event",
+    customerName: event.booking.customerName ?? null,
+    date: eventDate
+      ? {
+          reminderType,
+          isTomorrow: reminderType === "24_HOUR" && isTomorrowIST(eventDate),
+          timeStr: formatTimeIST(eventDate),
+          longDateStr: formatDateLongIST(eventDate),
+        }
+      : null,
+    venue: event.eventLocation || event.booking.customerAddress || null,
     guests: event.guestCount,
-  });
+  };
+}
+
+function buildNotificationContent(event, reminderType, lang) {
+  return renderNotification("eventReminder", lang, buildReminderRawParams(event, reminderType));
 }
 
 /**
@@ -206,6 +205,7 @@ async function _processEventReminder(event, reminderType, users) {
       (lang) => buildNotificationContent(event, reminderType, lang),
       notifData,
       "event_reminder",
+      { id: "eventReminder", raw: buildReminderRawParams(event, reminderType) },
     );
   } catch (err) {
     console.error(`[Reminder] sendGroupedNotification threw for event ${event.id}:`, err.message);

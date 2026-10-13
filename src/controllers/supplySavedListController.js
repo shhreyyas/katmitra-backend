@@ -10,6 +10,7 @@ const {
   convertSupplyQty,
 } = require("./supplyController");
 const { resolveFunctionTypeLabel } = require("../utils/functionTypeLabels");
+const { overlayBusinessUtensilStock } = require("../utils/businessUtensilStock");
 
 /** Saved lists hold ingredients and utensils (every category the booking's
  * own supply list offers). */
@@ -464,7 +465,9 @@ async function deleteOrderSupplyListForBooking(bookingId) {
  * and regenerates every active order list so recipe / guest count /
  * supply edits made anywhere show up. Best-effort.
  */
-const RECONCILE_MIN_INTERVAL_MS = 5 * 1000;
+// Lists are created on confirm and removed on complete/cancel, so this pass is
+// only a safety net — no need to pay for it on every open of the screen.
+const RECONCILE_MIN_INTERVAL_MS = 60 * 1000;
 /** businessId -> in-flight reconcile promise */
 const reconcileInFlight = new Map();
 /** businessId -> last finished reconcile time */
@@ -706,7 +709,7 @@ async function createSupplySavedList(req, res) {
       include: {
         items: { orderBy: { createdAt: "asc" } },
         bookingEvent: { select: { functionType: true } },
-        booking: { select: { functionType: true } },
+        booking: { select: { customerName: true, functionType: true } },
       },
     });
 
@@ -726,6 +729,24 @@ async function createSupplySavedList(req, res) {
  * first event at creation time (see bookingController.js) — good enough as
  * a representative value even though the booking may span several events.
  */
+const TITLE_LANGUAGES = ["en", "hi", "gu"];
+
+/**
+ * An order list's title is generated ("Customer - Event type") in whatever
+ * language the creating request used. Re-derive it in the reader's language,
+ * unless the stored title is something the user typed themselves.
+ */
+function resolveSavedListTitle(row, lang) {
+  const customerName = row.booking?.customerName;
+  if (!row.bookingId || !customerName) return row.title;
+  const booking = { customerName, functionType: row.booking.functionType };
+  const generated = TITLE_LANGUAGES.map((language) =>
+    buildSavedListTitle({ booking, language }),
+  );
+  if (!generated.includes(row.title)) return row.title;
+  return buildSavedListTitle({ booking, language: lang });
+}
+
 function resolveSavedListFunctionType(row, lang) {
   const slug = row.bookingEvent?.functionType ?? row.booking?.functionType ?? null;
   return resolveFunctionTypeLabel(slug, lang);
@@ -754,7 +775,7 @@ function formatSavedListSummary(row, lang) {
   return {
     ...resolveSavedListEventRange(row),
     id: row.id,
-    title: row.title,
+    title: resolveSavedListTitle(row, lang),
     booking_event_id: row.bookingEventId ?? null,
     booking_id: row.bookingId ?? null,
     item_count: row._count?.items ?? row.items?.length ?? 0,
@@ -771,7 +792,7 @@ function formatSavedListDetail(row, lang) {
   return {
     ...resolveSavedListEventRange(row),
     id: row.id,
-    title: row.title,
+    title: resolveSavedListTitle(row, lang),
     booking_event_id: row.bookingEventId ?? null,
     booking_id: row.bookingId ?? null,
     auto_sync: Boolean(row.autoSync),
@@ -825,7 +846,7 @@ async function listSupplySavedLists(req, res) {
       where.bookingId = null;
     }
 
-    const [total, rows] = await prisma.$transaction([
+    const [total, rows] = await Promise.all([
       prisma.supplySavedList.count({ where }),
       prisma.supplySavedList.findMany({
         where,
@@ -843,7 +864,7 @@ async function listSupplySavedLists(req, res) {
           updatedAt: true,
           _count: { select: { items: true } },
           bookingEvent: { select: { functionType: true, eventAt: true } },
-          booking: { select: { functionType: true, events: { select: { eventAt: true } } } },
+          booking: { select: { customerName: true, functionType: true, events: { select: { eventAt: true } } } },
         },
       }),
     ]);
@@ -897,7 +918,7 @@ async function getSupplySavedList(req, res) {
       include: {
         items: { orderBy: { createdAt: "asc" } },
         bookingEvent: { select: { functionType: true, eventAt: true } },
-        booking: { select: { functionType: true, events: { select: { eventAt: true } } } },
+        booking: { select: { customerName: true, functionType: true, events: { select: { eventAt: true } } } },
       },
     });
     if (!row) {
@@ -1047,7 +1068,7 @@ async function updateSupplySavedList(req, res) {
       include: {
         items: { orderBy: { createdAt: "asc" } },
         bookingEvent: { select: { functionType: true } },
-        booking: { select: { functionType: true } },
+        booking: { select: { customerName: true, functionType: true } },
       },
     });
 
@@ -1123,6 +1144,7 @@ async function assignSupplySavedListToBookingEvent(req, res) {
       },
       include: { category: true },
     });
+    await overlayBusinessUtensilStock(supplyRows, businessId);
     const byId = new Map(supplyRows.map((r) => [r.id, r]));
     if (supplyRows.length !== ids.length) {
       return errorResponse(

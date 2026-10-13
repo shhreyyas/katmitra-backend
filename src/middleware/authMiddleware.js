@@ -31,7 +31,14 @@ module.exports = async (req, res, next) => {
   try {
     user = await prisma.user.findUnique({
       where: { id: decoded.userId },
-      select: { sessionVersion: true, deletedAt: true },
+      // The business is loaded here too so businessContextMiddleware does not
+      // need its own round trip on the common single-business request.
+      select: {
+        sessionVersion: true,
+        deletedAt: true,
+        businessId: true,
+        business: { select: { id: true, createdByUserId: true } },
+      },
     });
   } catch (err) {
     console.error("authMiddleware DB lookup error:", err.message);
@@ -53,5 +60,6 @@ module.exports = async (req, res, next) => {
   // ──────────────────────────────────────────────────────────────────────
 
   req.user = decoded;
+  req.authUser = { businessId: user.businessId, business: user.business };
   next();
 };

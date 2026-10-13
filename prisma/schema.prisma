@@ -68,6 +68,7 @@ model Business {
   bookings             Booking[]
   quotations           Quotation[]
   supplyItems          SupplyItem[]
+  utensilStocks        BusinessUtensilStock[]
   supplySavedLists     SupplySavedList[]
   vendors              Vendor[]
   staff                Staff[]
@@ -576,12 +577,30 @@ model SupplyItem {
   bookingSupplyItems      BookingSupplyItem[]
   bookingEventSupplyItems BookingEventSupplyItem[]
   supplySavedListItems    SupplySavedListItem[]
+  businessStocks          BusinessUtensilStock[]
 
   @@index([businessId])
   @@index([createdByUserId])
   @@index([isGlobal])
   @@index([businessId, type, categorySlug, isActive])
   @@index([categorySlug])
+}
+
+/// A business's own stock for a shared (catalogue) utensil. Utensils the
+/// business created itself keep their counts on the SupplyItem row.
+model BusinessUtensilStock {
+  id             String     @id @default(uuid())
+  businessId     String
+  business       Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  supplyItemId   String
+  supplyItem     SupplyItem @relation(fields: [supplyItemId], references: [id], onDelete: Cascade)
+  availableCount Int?
+  damagedCount   Int        @default(0)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  @@unique([businessId, supplyItemId])
+  @@index([supplyItemId])
 }
 
 model BookingSupplyItem {
