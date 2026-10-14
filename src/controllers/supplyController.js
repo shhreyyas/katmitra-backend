@@ -8,6 +8,16 @@ const {
   resolveLocalizedName,
 } = require("../utils/localization");
 const { apiMessage } = require("../utils/apiMessages");
+const { translateUnitName } = require("../utils/messageTranslations");
+const {
+  isSharedUtensil,
+  stockModelAvailable,
+  loadBusinessUtensilStockMap,
+  applyBusinessUtensilStock,
+  overlayBusinessUtensilStock,
+  saveBusinessUtensilStock,
+  MISSING_TABLE_CODES,
+} = require("../utils/businessUtensilStock");
 
 const VALID_TYPES = new Set(["INGREDIENT", "UTENSIL"]);
 
@@ -41,6 +51,15 @@ function supplyCategoryLabelFor(categoryLabelMap, slug) {
 }
 
 /** List/select visibility mirrors menu listMenuItems OR-branches. */
+/**
+ * Catalogue (global) rows are shared by every business, so a business may only
+ * change or remove the items it created itself.
+ */
+function isOwnSupplyItem(row, businessId, userId) {
+  if (row.createdByUserId && row.createdByUserId === userId) return true;
+  return !row.isGlobal && row.businessId != null && row.businessId === businessId;
+}
+
 function supplyVisibilityOrBranches(businessId, userId) {
   return [
     { businessId, OR: [{ isGlobal: true }, { createdByUserId: userId }] },
@@ -137,10 +156,10 @@ function serializeSupplyItemCategory(row, lang) {
   };
 }
 
-function serializeSupplyUnit(row) {
+function serializeSupplyUnit(row, lang = "en") {
   return {
     id: row.id,
-    name: row.name,
+    name: translateUnitName(row.slug, row.name, lang),
     slug: row.slug,
     created_at: row.createdAt,
     updated_at: row.updatedAt,
@@ -393,6 +412,7 @@ async function listSupplyItems(req, res) {
           include: { category: true },
         }),
       ]);
+      await overlayBusinessUtensilStock(rows, businessId);
       return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
         items: rows.map((row) => serializeSupplyItem(row, language)),
         pagination: buildPagination(page, limit, total, rows.length),
@@ -405,6 +425,7 @@ async function listSupplyItems(req, res) {
       orderBy: { createdAt: "desc" },
       include: { category: true },
     });
+    await overlayBusinessUtensilStock(allMatching, businessId);
     const filteredRows = allMatching.filter((row) => nameMatchesSearch(row, qLower));
     const total = filteredRows.length;
     const pageRows = filteredRows.slice(skip, skip + limit);
@@ -416,6 +437,46 @@ async function listSupplyItems(req, res) {
     console.error("listSupplyItems:", e);
     return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
   }
+}
+
+/**
+ * A business "editing" a catalogue utensil only records its own stock for it;
+ * the shared row (name, units) is never touched.
+ */
+async function updateSharedUtensilStock(req, res, existing) {
+  const businessId = req.businessId;
+  const body = req.body || {};
+  if (!stockModelAvailable()) {
+    return errorResponse(res, "Stock tracking for catalogue utensils is not available yet", 503, "NOT_AVAILABLE");
+  }
+  const stockMap = await loadBusinessUtensilStockMap(businessId);
+  const current = stockMap.get(existing.id);
+  const availableCount =
+    body.available_count !== undefined
+      ? body.available_count == null
+        ? null
+        : Math.max(0, Number(body.available_count) || 0)
+      : current?.availableCount ?? null;
+  const damagedCount =
+    body.damaged_count !== undefined
+      ? Math.max(0, Number(body.damaged_count) || 0)
+      : current?.damagedCount ?? 0;
+  if (availableCount != null && damagedCount > availableCount) {
+    return errorResponse(res, "damaged_count cannot exceed available_count", 200, "VALIDATION_ERROR");
+  }
+  try {
+    await saveBusinessUtensilStock(businessId, existing.id, { availableCount, damagedCount });
+  } catch (e) {
+    if (!MISSING_TABLE_CODES.has(e?.code)) throw e;
+    return errorResponse(res, "Stock tracking for catalogue utensils is not available yet", 503, "NOT_AVAILABLE");
+  }
+  existing.availableCount = availableCount;
+  existing.damagedCount = damagedCount;
+  return successResponse(
+    res,
+    "Supply item updated",
+    serializeSupplyItem(existing, getRequestedLanguage(req)),
+  );
 }
 
 async function updateSupplyItem(req, res) {
@@ -434,6 +495,12 @@ async function updateSupplyItem(req, res) {
       include: { category: true },
     });
     if (!existing) return errorResponse(res, "Supply item not found", 404, "NOT_FOUND");
+    if (!isOwnSupplyItem(existing, businessId, userId)) {
+      if (!isSharedUtensil(existing)) {
+        return errorResponse(res, "Catalogue items cannot be edited", 403, "FORBIDDEN");
+      }
+      return updateSharedUtensilStock(req, res, existing);
+    }
     const hasNameInput = body.name !== undefined || body.name_i18n !== undefined;
     const names = hasNameInput
       ? normalizeLocalizedName(body.name ?? body.name_i18n)
@@ -575,9 +642,12 @@ async function deleteSupplyItem(req, res) {
         deletedAt: null,
         OR: supplyVisibilityOrBranches(businessId, userId),
       },
-      select: { id: true },
+      select: { id: true, businessId: true, isGlobal: true, createdByUserId: true },
     });
     if (!existing) return errorResponse(res, "Supply item not found", 404, "NOT_FOUND");
+    if (!isOwnSupplyItem(existing, businessId, userId)) {
+      return errorResponse(res, "Catalogue items cannot be deleted", 403, "FORBIDDEN");
+    }
     await prisma.supplyItem.update({ where: { id }, data: { isActive: false } });
     return successResponse(res, "Supply item deleted", { id });
   } catch (e) {
@@ -592,7 +662,7 @@ async function listSupplyUnits(req, res) {
       orderBy: [{ name: "asc" }, { createdAt: "desc" }],
     });
     return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
-      units: rows.map(serializeSupplyUnit),
+      units: rows.map((row) => serializeSupplyUnit(row, getRequestedLanguage(req))),
     });
   } catch (e) {
     console.error("listSupplyUnits:", e);
@@ -717,6 +787,7 @@ async function setBookingSupplyItems(req, res) {
       },
       include: { category: true },
     });
+    await overlayBusinessUtensilStock(supplyRows, businessId);
     const byId = new Map(supplyRows.map((row) => [row.id, row]));
     if (supplyRows.length !== ids.length) {
       return errorResponse(
@@ -871,6 +942,7 @@ async function setEventSupplyItems(req, res) {
       },
       include: { category: true },
     });
+    await overlayBusinessUtensilStock(supplyRows, businessId);
     const byId = new Map(supplyRows.map((row) => [row.id, row]));
     if (supplyRows.length !== ids.length) {
       return errorResponse(
@@ -1597,30 +1669,69 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
     // List screen) that aren't part of any dish's recipe — without this
     // they only ever showed up in the booking-wide totals table, never in
     // this event's own ingredient section.
-    const extraIngredientRows = savedIngredientRows.filter(
+    const unmatchedIngredientRows = savedIngredientRows.filter(
       (row) => !menuDerivedSupplyIds.has(row.supplyItemId),
     );
+    // A saved row scoped to one of this event's dishes (menuItemId set) is
+    // that dish's ingredient even when the dish has no recipe in the menu
+    // master — e.g. quantities typed per dish on the order. Keep it under
+    // its dish instead of lumping it into "Other ingredients".
+    const snapshotMenuItems = Array.isArray(event.eventSnapshot?.menu_items)
+      ? event.eventSnapshot.menu_items
+      : [];
+    const snapshotMenuIds = new Set(
+      snapshotMenuItems.map((row) => String(row?.id ?? "").trim()).filter(Boolean),
+    );
+    /** menuItemId -> saved rows */
+    const savedByMenuItem = new Map();
+    const extraIngredientRows = [];
+    for (const row of unmatchedIngredientRows) {
+      if (row.menuItemId && snapshotMenuIds.has(row.menuItemId)) {
+        if (!savedByMenuItem.has(row.menuItemId)) savedByMenuItem.set(row.menuItemId, []);
+        savedByMenuItem.get(row.menuItemId).push(row);
+      } else {
+        extraIngredientRows.push(row);
+      }
+    }
+    const toSavedLine = (row) => ({
+      name: resolveLocalizedName(row.nameSnapshot, language),
+      unit: row.unit,
+      quantity: row.quantity,
+      category_slug: row.categorySlug,
+      category_label: supplyCategoryLabelFor(categoryLabelMap, row.categorySlug),
+    });
+    const breakdownById = new Map(menuItemsBreakdown.map((item) => [item.menu_item_id, item]));
+    // Follow the event's menu order; a dish missing from the recipe
+    // breakdown still gets a group when it has saved rows.
+    const menuItemsOut = [];
+    const seenMenuIds = new Set();
+    for (const snapItem of snapshotMenuItems) {
+      const id = String(snapItem?.id ?? "").trim();
+      if (!id || seenMenuIds.has(id)) continue;
+      seenMenuIds.add(id);
+      const recipe = breakdownById.get(id);
+      const saved = savedByMenuItem.get(id) ?? [];
+      if (!recipe && saved.length === 0) continue;
+      menuItemsOut.push({
+        menu_item_id: id,
+        name: recipe?.name ?? snapItem.name ?? "",
+        ingredients: [
+          ...(recipe?.ingredients ?? []).map(({ name: n, unit, quantity, category_slug, category_label }) => ({
+            name: n,
+            unit,
+            quantity,
+            category_slug,
+            category_label,
+          })),
+          ...saved.map(toSavedLine),
+        ],
+      });
+    }
 
     eventsOut.push({
       event_id: event.id,
-      menu_items: menuItemsBreakdown.map(({ menu_item_id, name, ingredients }) => ({
-        menu_item_id,
-        name,
-        ingredients: ingredients.map(({ name: n, unit, quantity, category_slug, category_label }) => ({
-          name: n,
-          unit,
-          quantity,
-          category_slug,
-          category_label,
-        })),
-      })),
-      extra_ingredients: extraIngredientRows.map((row) => ({
-        name: resolveLocalizedName(row.nameSnapshot, language),
-        unit: row.unit,
-        quantity: row.quantity,
-        category_slug: row.categorySlug,
-        category_label: supplyCategoryLabelFor(categoryLabelMap, row.categorySlug),
-      })),
+      menu_items: menuItemsOut,
+      extra_ingredients: extraIngredientRows.map(toSavedLine),
       utensils: savedUtensilRows.map((row) => ({
         name: resolveLocalizedName(row.nameSnapshot, language),
         quantity: row.quantity,
@@ -1641,7 +1752,7 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
         );
       }
     }
-    for (const row of extraIngredientRows) {
+    for (const row of unmatchedIngredientRows) {
       addToTotals(
         ingredientTotals,
         row.supplyItemId,
@@ -2354,10 +2465,12 @@ async function shareEventSupplyItems(req, res) {
   return successResponse(res, "Share request queued", { ok: true });
 }
 
+/** Stored as 91 + 10 digits. Returns "" for anything that is not a 10-digit mobile number. */
 function normalizeVendorPhone(raw) {
   const digits = String(raw ?? "").replace(/[^\d]/g, "");
   if (digits.length === 10) return `91${digits}`;
-  return digits;
+  if (digits.length === 12 && digits.startsWith("91")) return digits;
+  return "";
 }
 
 function serializeVendor(row) {
@@ -2390,8 +2503,8 @@ async function createVendor(req, res) {
     if (!name) {
       return errorResponse(res, "Vendor name is required", 200, "VALIDATION_ERROR");
     }
-    if (!whatsappNo || whatsappNo.length < 10) {
-      return errorResponse(res, "Vendor phone is required", 200, "VALIDATION_ERROR");
+    if (!whatsappNo) {
+      return errorResponse(res, "Enter a valid 10-digit phone number", 200, "VALIDATION_ERROR");
     }
     if (!categorySlug) {
       return errorResponse(
@@ -2474,8 +2587,8 @@ async function updateVendor(req, res) {
       const whatsappNo = normalizeVendorPhone(
         body.whatsappNo ?? body.whatsapp_number ?? body.phone,
       );
-      if (!whatsappNo || whatsappNo.length < 10) {
-        return errorResponse(res, "Vendor phone is required", 200, "VALIDATION_ERROR");
+      if (!whatsappNo) {
+        return errorResponse(res, "Enter a valid 10-digit phone number", 200, "VALIDATION_ERROR");
       }
       data.whatsappNo = whatsappNo;
     }
@@ -2575,26 +2688,28 @@ function computeUtensilAvailability(total, assigned, damaged) {
       assigned: a,
       damaged: d,
       free: null,
-      status: a > 0 ? "IN_USE" : d > 0 ? "DAMAGED" : "AVAILABLE",
+      status: a > 0 ? "IN_USE" : "AVAILABLE",
     };
   }
   const t = Math.max(0, Number(total) || 0);
   const free = Math.max(0, t - a - d);
   let status = "AVAILABLE";
   if (a > 0) status = "IN_USE";
-  else if (d > 0) status = "DAMAGED";
+  // "Damaged" only when damage has left nothing usable; a few broken units
+  // still show in the damaged count without relabelling the whole item.
+  else if (d > 0 && free === 0) status = "DAMAGED";
   return { total: t, assigned: a, damaged: d, free, status };
 }
 
 async function loadActiveUtensilAssignmentMap(businessId, supplyItemIds) {
   const map = new Map();
-  if (!businessId || !Array.isArray(supplyItemIds) || supplyItemIds.length === 0) {
+  if (!businessId || (Array.isArray(supplyItemIds) && supplyItemIds.length === 0)) {
     return map;
   }
   const rows = await prisma.bookingEventSupplyItem.findMany({
     where: {
       itemType: "UTENSIL",
-      supplyItemId: { in: supplyItemIds },
+      ...(Array.isArray(supplyItemIds) ? { supplyItemId: { in: supplyItemIds } } : {}),
       bookingEvent: {
         status: { in: ACTIVE_UTENSIL_EVENT_STATUSES },
         booking: { businessId },
@@ -2681,20 +2796,21 @@ async function getUtensilsInventory(req, res) {
       ],
     };
 
-    let rows = await prisma.supplyItem.findMany({
-      where: visibilityWhere,
-      orderBy: { createdAt: "desc" },
-      include: { category: true },
-    });
+    const [allRows, assignmentMap, stockMap] = await Promise.all([
+      prisma.supplyItem.findMany({
+        where: visibilityWhere,
+        orderBy: { createdAt: "desc" },
+        include: { category: true },
+      }),
+      loadActiveUtensilAssignmentMap(businessId),
+      loadBusinessUtensilStockMap(businessId),
+    ]);
+    applyBusinessUtensilStock(allRows, stockMap);
 
+    let rows = allRows;
     if (q) {
       rows = rows.filter((row) => nameMatchesSearch(row, qLower));
     }
-
-    const assignmentMap = await loadActiveUtensilAssignmentMap(
-      businessId,
-      rows.map((row) => row.id),
-    );
 
     let items = rows.map((row) =>
       serializeUtensilInventoryRow(row, assignmentMap.get(row.id), language),
@@ -2760,7 +2876,10 @@ async function getUtensilInventoryDetail(req, res) {
     });
     if (!row) return errorResponse(res, "Utensil not found", 404, "NOT_FOUND");
 
-    const assignmentMap = await loadActiveUtensilAssignmentMap(businessId, [row.id]);
+    const [assignmentMap] = await Promise.all([
+      loadActiveUtensilAssignmentMap(businessId, [row.id]),
+      overlayBusinessUtensilStock([row], businessId),
+    ]);
     const item = serializeUtensilInventoryRow(
       row,
       assignmentMap.get(row.id),

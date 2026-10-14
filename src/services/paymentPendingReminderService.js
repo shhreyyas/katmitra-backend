@@ -108,6 +108,7 @@ async function _sendPaymentPendingReminder(booking, users) {
       }),
       notifData,
       "payment_pending",
+      { id: "paymentPending", raw: { customerName: booking.customerName ?? null } },
     );
   } catch (err) {
     console.error(`[PaymentPending] sendGroupedNotification threw for booking ${booking.id}:`, err.message);

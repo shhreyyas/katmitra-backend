@@ -65,6 +65,7 @@ async function _notify(quotation, users, messageId, params, type, reminderType) 
       (lang) => getNotificationContent(messageId, lang, params),
       notifData,
       type,
+      { id: messageId, raw: params },
     );
   } catch (err) {
     console.error(`[QuotationReminder:${reminderType}] sendGroupedNotification threw for ${quotation.id}:`, err.message);

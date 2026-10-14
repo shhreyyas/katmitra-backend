@@ -114,6 +114,7 @@ async function _sendEventNoMenuReminder(event, users) {
       }),
       notifData,
       "event_no_menu",
+      { id: "eventNoMenu", raw: { customerName: event.booking.customerName ?? null } },
     );
   } catch (err) {
     console.error(`[EventNoMenu] sendGroupedNotification threw for event ${event.id}:`, err.message);

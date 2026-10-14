@@ -13,9 +13,12 @@ const { normalizeLanguageCode } = require("./localization");
  * @param {(lang: string) => {title: string, body: string}} buildContent
  * @param {object} notifData - shared `data` payload (deep-link info) for every recipient
  * @param {string} type - UserNotification.type
+ * @param {{id: string, raw?: object}} [i18n] - message id + language-independent values,
+ *   stored with the inbox row so it can be shown later in the app's current language
  * @returns {Promise<{successCount: number, errorCount: number, skippedCount: number, notifiedUserIds: string[]}>}
  */
-async function sendGroupedNotification(recipients, buildContent, notifData, type) {
+async function sendGroupedNotification(recipients, buildContent, notifData, type, i18n) {
+  const inboxData = i18n ? { ...notifData, i18n } : notifData;
   const eligible = recipients.filter((r) => r.deviceToken);
 
   const groups = new Map();
@@ -42,7 +45,7 @@ async function sendGroupedNotification(recipients, buildContent, notifData, type
             title,
             body,
             type,
-            data: notifData,
+            data: inboxData,
           })),
         });
       } catch (err) {

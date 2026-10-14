@@ -125,8 +125,8 @@ const notificationTranslations = {
       body: `${clientName} के लिए आपके कोटेशन का इवेंट 3 दिनों में है। कृपया सुनिश्चित करें कि सब कुछ कन्फर्म है।`,
     }),
     gu: ({ clientName }) => ({
-      title: "ક્વોટેશન કાર્યક્રમ નજીક છે! 📋",
-      body: `${clientName} માટેના તમારા ક્વોટેશનનો કાર્યક્રમ 3 દિવસમાં છે. કૃપા કરીને ખાતરી કરો કે બધું કન્ફર્મ છે.`,
+      title: "કોટેશન કાર્યક્રમ નજીક છે! 📋",
+      body: `${clientName} માટેના તમારા કોટેશનનો કાર્યક્રમ 3 દિવસમાં છે. કૃપા કરીને ખાતરી કરો કે બધું કન્ફર્મ છે.`,
     }),
   },
 
@@ -140,8 +140,8 @@ const notificationTranslations = {
       body: `${clientName} के लिए आपके कोटेशन की इवेंट तिथि बीत चुकी है। कृपया इसकी स्थिति अपडेट करें।`,
     }),
     gu: ({ clientName }) => ({
-      title: "ક્વોટેશન કાર્યક્રમ પસાર થઈ ગયો છે 📋",
-      body: `${clientName} માટેના તમારા ક્વોટેશનની કાર્યક્રમ તારીખ પસાર થઈ ગઈ છે. કૃપા કરીને તેની સ્થિતિ અપડેટ કરો.`,
+      title: "કોટેશન કાર્યક્રમ પસાર થઈ ગયો છે 📋",
+      body: `${clientName} માટેના તમારા કોટેશનની કાર્યક્રમ તારીખ પસાર થઈ ગઈ છે. કૃપા કરીને તેની સ્થિતિ અપડેટ કરો.`,
     }),
   },
 
@@ -215,9 +215,57 @@ function getNotificationContent(messageId, lang, params = {}) {
   return build(params);
 }
 
+/**
+ * Renders a notification from language-independent values, so the same
+ * notification can be written at send time and shown again later in whatever
+ * language the app is using.
+ *
+ * @param {string} messageId
+ * @param {string} lang
+ * @param {object} raw - plain values; `customerName` and `date` are turned into
+ *   the language-specific `forSuffix` / `datePhrase` the templates expect.
+ */
+function renderNotification(messageId, lang, raw = {}) {
+  const params = { ...raw };
+  if ("customerName" in raw) {
+    params.forSuffix = buildForSuffix(lang, raw.customerName);
+  }
+  if (raw.date) {
+    params.datePhrase = buildEventDatePhrase(lang, raw.date);
+  } else if ("date" in raw) {
+    params.datePhrase = "";
+  }
+  return getNotificationContent(messageId, lang, params);
+}
+
+/** Notification types whose text takes no values, so even old rows can be re-rendered. */
+const STATIC_MESSAGE_ID_BY_TYPE = {
+  business_welcome: "welcome",
+  business_reminder: "onboarding",
+};
+
+/**
+ * Title/body for a stored UserNotification in `lang`. Falls back to the text
+ * saved at send time when the row has nothing to re-render from (admin
+ * broadcasts, and reminders saved before `data.i18n` existed).
+ */
+function localizeStoredNotification(row, lang) {
+  const stored = { title: row.title, body: row.body };
+  const i18n = row.data && typeof row.data === "object" ? row.data.i18n : null;
+  const messageId = i18n?.id || STATIC_MESSAGE_ID_BY_TYPE[row.type];
+  if (!messageId || !notificationTranslations[messageId]) return stored;
+  try {
+    return renderNotification(messageId, lang, i18n?.raw || {});
+  } catch {
+    return stored;
+  }
+}
+
 module.exports = {
   notificationTranslations,
   getNotificationContent,
+  renderNotification,
+  localizeStoredNotification,
   buildForSuffix,
   buildEventDatePhrase,
 };

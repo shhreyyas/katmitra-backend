@@ -18,6 +18,17 @@ module.exports = async (req, res, next) => {
       resolvedBusinessId = req.user?.businessId ?? null;
     }
 
+    // Fast path: authMiddleware already loaded the user's own business, so when
+    // that is the business being asked for there is nothing left to verify.
+    const ownBusiness = req.authUser?.business;
+    if (
+      ownBusiness &&
+      (resolvedBusinessId ?? req.authUser.businessId) === ownBusiness.id
+    ) {
+      req.businessId = ownBusiness.id;
+      return next();
+    }
+
     let userBusinessId = req.user?.businessId ?? null;
     const needsUserLookup =
       !resolvedBusinessId || resolvedBusinessId !== userBusinessId;

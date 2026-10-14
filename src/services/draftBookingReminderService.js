@@ -63,6 +63,7 @@ async function _notify(booking, users, messageId, params, type, reminderType) {
       (lang) => getNotificationContent(messageId, lang, { forSuffix: buildForSuffix(lang, params.customerName) }),
       notifData,
       type,
+      { id: messageId, raw: { customerName: params.customerName ?? null } },
     );
   } catch (err) {
     console.error(`[DraftReminder:${reminderType}] sendGroupedNotification threw for ${booking.id}:`, err.message);

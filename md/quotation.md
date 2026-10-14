@@ -55,6 +55,8 @@ Four Prisma models, all under `katmitra-backend/prisma/schema.prisma`, deliberat
 
 **`Expired` is a derived, non-persisted concept**, not a DB status. A quotation is expired when `now` has passed its validity window — 2 days before its **earliest** event, or 30 days after `createdAt` if no event date is set — **and** it isn't `ACCEPTED` (an accepted quotation is never expired; it's already a real booking).
 
+**2026-10-10 update:** when a quotation is issued *inside* that 2-day window (event less than 2 days away), it now stays valid until the event starts. Previously the window collapsed to `createdAt`, so such a quotation was expired the instant it was saved and could never be confirmed. Both copies of the formula were changed together.
+
 This formula is intentionally duplicated in two places and **must be kept in sync**:
 - App: `computeQuotationExpiryDate` / `isQuotationExpired` in `katmitra-app/src/utils/quotationPdf.ts`
 - Backend: `isQuotationExpired` in `katmitra-backend/src/controllers/quotationPricingHelpers.js`

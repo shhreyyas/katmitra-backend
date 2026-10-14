@@ -16,6 +16,7 @@ const { uploadBase64ToBucket } = require("../utils/uploadBase64Image");
 const { sendPushNotifications } = require("../utils/expoPush");
 const { getNotificationContent } = require("../utils/notificationTranslations");
 const { ensureSettings } = require("./adminSettingsController");
+const { normalizeGstNumber } = require("../utils/validators");
 
 const TRIAL_DAYS = 30;
 const BUSINESS_LOGO_BUCKET = "business_profile_pictures";
@@ -207,6 +208,11 @@ exports.registerBusiness = async (req, res) => {
       owners,
     } = req.body;
 
+    const gstNormalized = normalizeGstNumber(gst_number);
+    if (gstNormalized === null) {
+      return errorResponse(res, "GST number is invalid", 200, "VALIDATION_ERROR");
+    }
+
     const yoe = years_of_experience !== undefined ? Number(years_of_experience) : 0;
     if (
       !business_name ||
@@ -341,7 +347,7 @@ exports.registerBusiness = async (req, res) => {
           cateringTypes: Array.isArray(catering_types) ? catering_types : [],
           yearsExperience: Number.isFinite(yoe) ? yoe : 0,
           registrationNumber: business_register_number ?? "",
-          gstNumber: gst_number ?? "",
+          gstNumber: gstNormalized,
           subscriptionStatus: "trial",
           subscriptionPlan: "FREE",
           subscriptionStart: now,
@@ -506,7 +512,11 @@ exports.updateBusiness = async (req, res) => {
       data.logoUrl = v || null;
     }
     if (gst_number !== undefined) {
-      data.gstNumber = String(gst_number).trim() || "";
+      const gst = normalizeGstNumber(gst_number);
+      if (gst === null) {
+        return errorResponse(res, "GST number is invalid", 200, "VALIDATION_ERROR");
+      }
+      data.gstNumber = gst;
     }
     if (business_address !== undefined) {
       data.address = String(business_address).trim() || null;
