@@ -635,8 +635,16 @@ exports.listMenuItems = async (req, res) => {
       filterAnd.push({ OR: searchOr });
     }
 
+    // A global item this user has edited is replaced by their private copy (see the fork in
+    // updateMenuItem), so the original is left out for them; other businesses still see it.
+    const hideReplacedGlobals = {
+      NOT: { childCopies: { some: { businessId, createdByUserId: userId, deletedAt: null } } },
+    };
+
     // Admin force-deleted items stay in the table for existing bookings but are no longer offered.
-    const where = { AND: [{ OR: orBranches }, { deletedAt: null }, ...filterAnd] };
+    const where = {
+      AND: [{ OR: orBranches }, { deletedAt: null }, hideReplacedGlobals, ...filterAnd],
+    };
 
     const [totalRecord, rows] = await Promise.all([
       prisma.menuItem.count({ where }),

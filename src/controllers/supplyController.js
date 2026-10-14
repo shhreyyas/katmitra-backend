@@ -1669,30 +1669,69 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
     // List screen) that aren't part of any dish's recipe — without this
     // they only ever showed up in the booking-wide totals table, never in
     // this event's own ingredient section.
-    const extraIngredientRows = savedIngredientRows.filter(
+    const unmatchedIngredientRows = savedIngredientRows.filter(
       (row) => !menuDerivedSupplyIds.has(row.supplyItemId),
     );
+    // A saved row scoped to one of this event's dishes (menuItemId set) is
+    // that dish's ingredient even when the dish has no recipe in the menu
+    // master — e.g. quantities typed per dish on the order. Keep it under
+    // its dish instead of lumping it into "Other ingredients".
+    const snapshotMenuItems = Array.isArray(event.eventSnapshot?.menu_items)
+      ? event.eventSnapshot.menu_items
+      : [];
+    const snapshotMenuIds = new Set(
+      snapshotMenuItems.map((row) => String(row?.id ?? "").trim()).filter(Boolean),
+    );
+    /** menuItemId -> saved rows */
+    const savedByMenuItem = new Map();
+    const extraIngredientRows = [];
+    for (const row of unmatchedIngredientRows) {
+      if (row.menuItemId && snapshotMenuIds.has(row.menuItemId)) {
+        if (!savedByMenuItem.has(row.menuItemId)) savedByMenuItem.set(row.menuItemId, []);
+        savedByMenuItem.get(row.menuItemId).push(row);
+      } else {
+        extraIngredientRows.push(row);
+      }
+    }
+    const toSavedLine = (row) => ({
+      name: resolveLocalizedName(row.nameSnapshot, language),
+      unit: row.unit,
+      quantity: row.quantity,
+      category_slug: row.categorySlug,
+      category_label: supplyCategoryLabelFor(categoryLabelMap, row.categorySlug),
+    });
+    const breakdownById = new Map(menuItemsBreakdown.map((item) => [item.menu_item_id, item]));
+    // Follow the event's menu order; a dish missing from the recipe
+    // breakdown still gets a group when it has saved rows.
+    const menuItemsOut = [];
+    const seenMenuIds = new Set();
+    for (const snapItem of snapshotMenuItems) {
+      const id = String(snapItem?.id ?? "").trim();
+      if (!id || seenMenuIds.has(id)) continue;
+      seenMenuIds.add(id);
+      const recipe = breakdownById.get(id);
+      const saved = savedByMenuItem.get(id) ?? [];
+      if (!recipe && saved.length === 0) continue;
+      menuItemsOut.push({
+        menu_item_id: id,
+        name: recipe?.name ?? snapItem.name ?? "",
+        ingredients: [
+          ...(recipe?.ingredients ?? []).map(({ name: n, unit, quantity, category_slug, category_label }) => ({
+            name: n,
+            unit,
+            quantity,
+            category_slug,
+            category_label,
+          })),
+          ...saved.map(toSavedLine),
+        ],
+      });
+    }
 
     eventsOut.push({
       event_id: event.id,
-      menu_items: menuItemsBreakdown.map(({ menu_item_id, name, ingredients }) => ({
-        menu_item_id,
-        name,
-        ingredients: ingredients.map(({ name: n, unit, quantity, category_slug, category_label }) => ({
-          name: n,
-          unit,
-          quantity,
-          category_slug,
-          category_label,
-        })),
-      })),
-      extra_ingredients: extraIngredientRows.map((row) => ({
-        name: resolveLocalizedName(row.nameSnapshot, language),
-        unit: row.unit,
-        quantity: row.quantity,
-        category_slug: row.categorySlug,
-        category_label: supplyCategoryLabelFor(categoryLabelMap, row.categorySlug),
-      })),
+      menu_items: menuItemsOut,
+      extra_ingredients: extraIngredientRows.map(toSavedLine),
       utensils: savedUtensilRows.map((row) => ({
         name: resolveLocalizedName(row.nameSnapshot, language),
         quantity: row.quantity,
@@ -1713,7 +1752,7 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
         );
       }
     }
-    for (const row of extraIngredientRows) {
+    for (const row of unmatchedIngredientRows) {
       addToTotals(
         ingredientTotals,
         row.supplyItemId,
