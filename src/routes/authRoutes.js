@@ -4,6 +4,7 @@ const {
   signup,
   verifyOtp,
   signIn,
+  googleSignIn,
   signOut,
   resendOtp,
   forgotPassword,
@@ -22,6 +23,7 @@ const { uploadProfileImage } = require("../controllers/uploadController");
 router.post("/v1/signup", signup);
 router.post("/v1/verify-otp", verifyOtp);
 router.post("/v1/signin", signIn);
+router.post("/v1/google-signin", googleSignIn);
 router.post("/v1/resend-otp", resendOtp);
 router.post("/v1/forgot-password", forgotPassword);
 router.post("/v1/verify-forgot-otp", verifyForgotOtp);

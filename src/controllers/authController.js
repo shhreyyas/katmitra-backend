@@ -1,6 +1,7 @@
 const prisma = require("../config/prisma");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const { OAuth2Client } = require("google-auth-library");
 const { successResponse, errorResponse } = require("../utils/response");
 const { sendOtpEmail } = require("../utils/email");
 const { logActivity } = require("../utils/activityLog");
@@ -9,6 +10,8 @@ const {
   validatePdfPrefix,
 } = require("../utils/formatUser");
 const { SUPPORTED_LANGUAGE_CODES } = require("../utils/localization");
+
+const googleClient = new OAuth2Client();
 
 const validatePassword = (password) => {
   const regex = /^(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/;
@@ -361,6 +364,15 @@ exports.signIn = async (req, res) => {
       );
     }
 
+    if (!user.passwordHash) {
+      return errorResponse(
+        res,
+        "This account uses Google sign-in. Continue with Google, or use Forgot Password to set a password.",
+        200,
+        "GOOGLE_ACCOUNT",
+      );
+    }
+
     const isMatch = await bcrypt.compare(password, user.passwordHash);
     if (!isMatch) {
       return errorResponse(
@@ -486,6 +498,147 @@ exports.signIn = async (req, res) => {
     });
   } catch (error) {
     console.error("Login error:", error.message);
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+/**
+ * POST /v1/google-signin
+ *
+ * Verifies a Google ID token from the app and signs the user in. Looks up by
+ * googleId first, then by email (case-insensitive) — an existing email/password
+ * or staff account is linked to the Google account. Unknown emails get a new
+ * verified owner account with no password, which then goes through onboarding.
+ */
+exports.googleSignIn = async (req, res) => {
+  try {
+    const { id_token, device_type, device_token, language } = req.body;
+
+    if (!id_token || device_type === undefined) {
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    if (!process.env.GOOGLE_WEB_CLIENT_ID) {
+      console.error("Google sign-in error: GOOGLE_WEB_CLIENT_ID is not set");
+      return errorResponse(res, "Server error", 500, "ERROR");
+    }
+
+    let payload;
+    try {
+      const ticket = await googleClient.verifyIdToken({
+        idToken: id_token,
+        audience: process.env.GOOGLE_WEB_CLIENT_ID,
+      });
+      payload = ticket.getPayload();
+    } catch (verifyErr) {
+      console.error("Google token verification failed:", verifyErr.message);
+      return errorResponse(res, "Google sign-in failed", 200, "INVALID_GOOGLE_TOKEN");
+    }
+
+    if (!payload?.sub || !payload.email || !payload.email_verified) {
+      return errorResponse(res, "Google sign-in failed", 200, "INVALID_GOOGLE_TOKEN");
+    }
+
+    const googleId = payload.sub;
+    const email = payload.email.toLowerCase();
+
+    let user =
+      (await prisma.user.findUnique({ where: { googleId } })) ||
+      (await prisma.user.findFirst({
+        where: { email: { equals: email, mode: "insensitive" } },
+      }));
+
+    if (user?.deletedAt) {
+      return errorResponse(res, "Account not found", 200, "USER_NOT_FOUND");
+    }
+
+    let isNewUser = false;
+    const notificationStatus = notificationStatusFromDeviceToken(device_token);
+    const deviceData = {
+      notificationStatus,
+      deviceToken: device_token ?? null,
+      deviceType: device_type,
+    };
+
+    if (!user) {
+      isNewUser = true;
+      user = await prisma.user.create({
+        data: {
+          name: payload.name || email.split("@")[0],
+          email,
+          googleId,
+          authProvider: "google",
+          profileImageUrl: payload.picture ?? null,
+          isVerified: true,
+          userVerifiedAt: new Date(),
+          ...(SUPPORTED_LANGUAGE_CODES.has(language) ? { language } : {}),
+          ...deviceData,
+        },
+      });
+    } else {
+      const linking = !user.googleId;
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          ...deviceData,
+          sessionVersion: { increment: 1 },
+          ...(linking
+            ? { googleId, authProvider: user.passwordHash ? "both" : "google" }
+            : {}),
+          // Google has verified this email, so a pending OTP verification is no longer needed.
+          ...(!user.isVerified ? { isVerified: true, userVerifiedAt: new Date() } : {}),
+          ...(!user.profileImageUrl && payload.picture
+            ? { profileImageUrl: payload.picture }
+            : {}),
+        },
+      });
+    }
+
+    const business_details = await loadBusinessDetailsArray(user.businessId);
+
+    const token = jwt.sign(
+      {
+        userId: user.id,
+        businessId: user.businessId,
+        role: user.role,
+        sessionVersion: user.sessionVersion,
+      },
+      process.env.JWT_SECRET,
+      signInTokenOptions(user.role, device_type),
+    );
+
+    const formattedUser = formatUserResponse(user, {
+      status: 1,
+      device_type,
+      device_token: device_token || null,
+      business_details,
+    });
+
+    logActivity({
+      type: isNewUser ? "google_signup" : "google_login",
+      message: `Google ${isNewUser ? "signup" : "login"}: ${user.email}`,
+      actorUserId: user.id,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Login successful",
+      data: {
+        token,
+        user: formattedUser,
+        is_new_user: isNewUser,
+      },
+    });
+  } catch (error) {
+    console.error("Google sign-in error:", error.message);
+    if (error.code === "P2002") {
+      return errorResponse(res, "Email already registered.", 200, "USER_EXISTS");
+    }
     return errorResponse(res, "Server error", 500, "ERROR");
   }
 };
@@ -618,7 +771,20 @@ exports.verifyForgotOtp = async (req, res) => {
       data: { isUsed: true },
     });
 
-    return successResponse(res, "OTP verified", null, 200);
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      return errorResponse(res, "No account found for the given email", 404, "USER_NOT_FOUND");
+    }
+
+    // Short-lived proof that the forgot OTP was verified. Binding it to the
+    // current sessionVersion makes it single-use: newPassword bumps the version.
+    const resetToken = jwt.sign(
+      { userId: user.id, email: user.email, purpose: "reset", sessionVersion: user.sessionVersion },
+      process.env.JWT_SECRET,
+      { expiresIn: "10m" },
+    );
+
+    return successResponse(res, "OTP verified", { resetToken }, 200);
   } catch (error) {
     return errorResponse(res, "Server error", 500, "ERROR");
   }
@@ -676,9 +842,9 @@ exports.resendForgotOtp = async (req, res) => {
 
 exports.newPassword = async (req, res) => {
   try {
-    const { email, password, password_confirmation } = req.body;
+    const { email, password, password_confirmation, reset_token } = req.body;
 
-    if (!email || !password || !password_confirmation) {
+    if (!email || !password || !password_confirmation || !reset_token) {
       return errorResponse(
         res,
         "One or more required fields are missing or malformed",
@@ -705,16 +871,33 @@ exports.newPassword = async (req, res) => {
       );
     }
 
+    let resetClaims;
+    try {
+      resetClaims = jwt.verify(reset_token, process.env.JWT_SECRET);
+    } catch {
+      resetClaims = null;
+    }
+    if (!resetClaims || resetClaims.purpose !== "reset" || resetClaims.email !== email) {
+      return errorResponse(res, "Reset link is invalid or has expired", 200, "INVALID_RESET_TOKEN");
+    }
+
     const existing = await prisma.user.findUnique({ where: { email } });
     if (!existing) {
       return errorResponse(res, "No account found for the given email", 404, "USER_NOT_FOUND");
+    }
+    if (existing.id !== resetClaims.userId || existing.sessionVersion !== resetClaims.sessionVersion) {
+      return errorResponse(res, "Reset link is invalid or has expired", 200, "INVALID_RESET_TOKEN");
     }
 
     const hashedPassword = await bcrypt.hash(password, 8);
 
     await prisma.user.update({
       where: { email },
-      data: { passwordHash: hashedPassword },
+      data: {
+        passwordHash: hashedPassword,
+        sessionVersion: { increment: 1 },
+        ...(existing.googleId ? { authProvider: "both" } : {}),
+      },
     });
 
     return successResponse(res, "Password reset successfully", null, 200);

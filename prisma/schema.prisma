@@ -149,7 +149,11 @@ model User {
   businessId         String?
   name               String
   email              String    @unique
-  passwordHash       String
+  passwordHash       String?
+  /// Google account "sub"; set when the user signs in with Google.
+  googleId           String?   @unique
+  /// "email", "google", or "both" (password + linked Google account).
+  authProvider       String    @default("email")
   phoneNumber        String?
   profileImageUrl    String?
   pdfPrefix          String?   @default("KAT-2024")

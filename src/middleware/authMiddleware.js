@@ -16,6 +16,11 @@ module.exports = async (req, res, next) => {
     return errorResponse(res, "Missing or invalid auth token", 401, "UNAUTHORIZED");
   }
 
+  // Password-reset tokens share the signing secret but are not sessions.
+  if (decoded.purpose) {
+    return errorResponse(res, "Missing or invalid auth token", 401, "UNAUTHORIZED");
+  }
+
   // ── Single-device enforcement ──────────────────────────────────────────
   // Every login increments sessionVersion in the DB and embeds the new
   // value in the issued JWT. If the user has logged in on another device
