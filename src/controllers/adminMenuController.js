@@ -67,6 +67,8 @@ function formatAdminMenuItem(row, language = "en") {
     business_id: row.businessId,
     business_name: row.business?.name ?? null,
     is_global: isGlobal,
+    // The business's own version of a catalog item (it hides that catalog item for the business).
+    is_catalog_copy: Boolean(row.parentMenuId),
     ingredients: normalizeIngredients(row.ingredients),
     image_url: row.imageUrl ?? null,
     created_at: row.createdAt.toISOString(),
@@ -295,6 +297,11 @@ exports.updateMenuItem = async (req, res) => {
       updates.businessId = scopeResult.businessId;
       updates.isGlobal = deriveIsGlobal(scopeResult.businessId, adminUserId);
       updates.createdByUserId = adminUserId;
+      // A business's copy of a catalog item that moves to another scope is no longer
+      // that business's copy; unlink it so the catalog item shows for the business again.
+      if (existing.parentMenuId && scopeResult.businessId !== existing.businessId) {
+        updates.parentMenuId = null;
+      }
     }
 
     if (req.body.name !== undefined) {

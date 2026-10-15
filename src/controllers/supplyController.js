@@ -5,6 +5,7 @@ const { renderSupplyPdfBuffer } = require("../utils/renderSupplyPdfBuffer");
 const {
   getRequestedLanguage,
   normalizeLocalizedName,
+  normalizeTypedItemName,
   resolveLocalizedName,
 } = require("../utils/localization");
 const { apiMessage } = require("../utils/apiMessages");
@@ -283,7 +284,7 @@ async function createSupplyItem(req, res) {
     const categorySlug = String(body.category_slug ?? body.category ?? "")
       .trim()
       .toLowerCase();
-    const names = normalizeLocalizedName(body.name ?? body.name_i18n);
+    const names = normalizeTypedItemName(body.name ?? body.name_i18n);
     if (!VALID_TYPES.has(type)) {
       return errorResponse(res, "Invalid type", 200, "VALIDATION_ERROR");
     }
@@ -527,7 +528,7 @@ async function makeSupplyItemOwn(req, res) {
     }
 
     const hasNameInput = body.name !== undefined || body.name_i18n !== undefined;
-    const names = hasNameInput ? normalizeLocalizedName(body.name ?? body.name_i18n) : global.name;
+    const names = hasNameInput ? normalizeTypedItemName(body.name ?? body.name_i18n, global.name) : global.name;
     if (!names) {
       return errorResponse(res, "All language names are required", 200, "VALIDATION_ERROR");
     }
@@ -660,7 +661,7 @@ async function updateSupplyItem(req, res) {
     }
     const hasNameInput = body.name !== undefined || body.name_i18n !== undefined;
     const names = hasNameInput
-      ? normalizeLocalizedName(body.name ?? body.name_i18n)
+      ? normalizeTypedItemName(body.name ?? body.name_i18n, existing.name)
       : null;
     if (hasNameInput && !names) {
       return errorResponse(

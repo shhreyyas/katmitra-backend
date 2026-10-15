@@ -38,6 +38,8 @@ function formatAdminSupplyItem(row, language = "en") {
     business_id: row.businessId,
     business_name: row.business?.name ?? null,
     is_global: isGlobal,
+    // The business's own version of a catalog item (it hides that catalog item for the business).
+    is_catalog_copy: Boolean(row.parentSupplyItemId),
     unit_options: row.unitOptions ?? [],
     default_unit: row.defaultUnit,
     available_count: row.availableCount ?? null,
@@ -281,6 +283,11 @@ exports.updateSupplyItem = async (req, res) => {
       updates.businessId = scopeResult.businessId;
       updates.isGlobal = deriveIsGlobal(scopeResult.businessId, adminUserId);
       updates.createdByUserId = adminUserId;
+      // A business's copy of a catalog item that moves to another scope is no longer
+      // that business's copy; unlink it so the catalog item shows for the business again.
+      if (existing.parentSupplyItemId && scopeResult.businessId !== existing.businessId) {
+        updates.parentSupplyItemId = null;
+      }
     }
 
     if (req.body.name !== undefined) {

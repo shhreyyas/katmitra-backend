@@ -4,6 +4,7 @@ const { successResponse, errorResponse } = require("../utils/response");
 const {
   getRequestedLanguage,
   normalizeLocalizedName,
+  normalizeTypedItemName,
   resolveLocalizedName,
 } = require("../utils/localization");
 const { apiMessage } = require("../utils/apiMessages");
@@ -370,7 +371,7 @@ exports.createMenuItem = async (req, res) => {
         "name, price_per_person, category/category_slug, and food_type are required.",
       );
     }
-    const normalizedName = normalizeLocalizedName(name);
+    const normalizedName = normalizeTypedItemName(name);
     if (!normalizedName) {
       return errorResponse(
         res,
@@ -894,7 +895,7 @@ exports.updateMenuItem = async (req, res) => {
     const updates = {};
 
     if (name !== undefined) {
-      const normalizedName = normalizeLocalizedName(name);
+      const normalizedName = normalizeTypedItemName(name, menu.name);
       if (!normalizedName) {
         return errorResponse(
           res,

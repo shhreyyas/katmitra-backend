@@ -59,6 +59,40 @@ function normalizeLocalizedName(input) {
   return out;
 }
 
+/** Language of a typed name, from its script: Gujarati → gu, Devanagari → hi, else en. */
+function detectNameLanguage(text) {
+  const s = String(text ?? "");
+  if (/[\u0A80-\u0AFF]/.test(s)) return "gu";
+  if (/[\u0900-\u097F]/.test(s)) return "hi";
+  return "en";
+}
+
+/**
+ * Names caterers type for their own menu and supply items. The app sends one typed
+ * name, either as a plain string or copied into every language, so it is stored only
+ * under the language it is written in instead of being filed as English. A name that
+ * really differs per language is kept as given. With `current`, the typed name replaces
+ * only its own language and the item's other translations are kept.
+ */
+function normalizeTypedItemName(input, current = null) {
+  const normalized = normalizeLocalizedName(input);
+  if (!normalized) return null;
+  const typed =
+    typeof input === "string" && !tryParseJsonObjectString(input.trim())
+      ? input.trim()
+      : null;
+  const values = [...new Set(Object.values(input && typeof input === "object" ? input : normalized)
+    .map((v) => (typeof v === "string" ? v.trim() : ""))
+    .filter(Boolean))];
+  const single = typed ?? (values.length === 1 ? values[0] : null);
+  if (!single) return normalized;
+  const lang = detectNameLanguage(single);
+  const base =
+    current && typeof current === "object" && !Array.isArray(current) ? { ...current } : {};
+  base[lang] = single;
+  return base;
+}
+
 function resolveLocalizedName(nameValue, language) {
   function resolveStringValue(raw) {
     if (typeof raw !== "string") return "";
@@ -100,5 +134,7 @@ module.exports = {
   normalizeLanguageCode,
   getRequestedLanguage,
   normalizeLocalizedName,
+  normalizeTypedItemName,
+  detectNameLanguage,
   resolveLocalizedName,
 };
