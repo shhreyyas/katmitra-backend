@@ -65,33 +65,84 @@ function supplyVisibilityOrBranches(businessId, userId) {
     { businessId, OR: [{ isGlobal: true }, { createdByUserId: userId }] },
     { businessId: null, OR: [{ createdByUserId: userId }, { isGlobal: true }] },
     { createdByUserId: userId },
+    // A business's own version of a global item ("Make it my own") is shared by the whole business.
+    { businessId, parentSupplyItemId: { not: null } },
   ];
 }
 
 /**
- * Same name is fine in a different category, but not twice in the same one —
- * checked case-insensitively (in the requester's language) among items
- * visible to them (global + their own), matching the picker they'd actually
- * see this new/renamed item next to.
+ * Leaves out a global item once this business has its own live version of it, so
+ * catalog lists and pickers show only their version. Other businesses still see the
+ * global item. Lookups by id for existing records don't use this.
  */
-async function findDuplicateSupplyItem({ businessId, userId, categorySlug, names, language, excludeId }) {
-  const requestedLower = resolveLocalizedName(names, language).trim().toLowerCase();
-  if (!requestedLower) return null;
+function hideReplacedGlobalSupply(businessId) {
+  return { NOT: { childCopies: { some: { businessId, deletedAt: null, isActive: true } } } };
+}
+
+/** Lower-cased, trimmed names in every language a row has. */
+function nameVariants(names) {
+  if (!names || typeof names !== "object") return new Set();
+  return new Set(
+    Object.values(names)
+      .map((v) => String(v ?? "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+/**
+ * Same name is fine in a different category, but not twice in the same one —
+ * checked case-insensitively against every language name (so "Potato" and
+ * "બટાકા" on the same item both count) among items visible to them (global +
+ * their own), matching the picker they'd actually see this new/renamed item
+ * next to. Returns `{ row, scope }`, preferring the business's own item, where
+ * scope is "own" or "global"; null when there's no clash.
+ */
+async function findDuplicateSupplyItem({ businessId, userId, categorySlug, names, excludeId }) {
+  const wanted = nameVariants(names);
+  if (wanted.size === 0) return null;
   const rows = await prisma.supplyItem.findMany({
     where: {
       isActive: true,
       deletedAt: null,
       categorySlug,
       OR: supplyVisibilityOrBranches(businessId, userId),
-      ...(excludeId ? { NOT: { id: excludeId } } : {}),
+      ...(excludeId
+        ? { NOT: { id: Array.isArray(excludeId) ? { in: excludeId } : excludeId } }
+        : {}),
     },
-    select: { id: true, name: true },
+    include: { category: true },
   });
-  return (
-    rows.find(
-      (r) => resolveLocalizedName(r.name, language).trim().toLowerCase() === requestedLower,
-    ) ?? null
-  );
+  const clashes = rows.filter((r) => [...nameVariants(r.name)].some((n) => wanted.has(n)));
+  if (clashes.length === 0) return null;
+  const own = clashes.find((r) => !deriveSupplyIsGlobal(r.businessId, r.createdByUserId));
+  if (own) return { row: own, scope: "own" };
+  return { row: clashes[0], scope: "global" };
+}
+
+/**
+ * Duplicate-name reply. A clash with the business's own item is a plain error; a
+ * clash with a catalog item returns that item (`error.existing`) with code
+ * DUPLICATE_GLOBAL so the app can offer "Use catalog item" or "Make it my own".
+ */
+function duplicateSupplyResponse(res, dup, language) {
+  if (dup.scope === "own") {
+    return errorResponse(
+      res,
+      apiMessage("supplyItem.duplicate", language),
+      200,
+      "DUPLICATE",
+      apiMessage("supplyItem.duplicateDetail", language),
+    );
+  }
+  return res.status(200).json({
+    success: false,
+    message: apiMessage("supplyItem.duplicateGlobal", language),
+    error: {
+      code: "DUPLICATE_GLOBAL",
+      message: apiMessage("supplyItem.duplicateGlobalDetail", language),
+      existing: serializeSupplyItem(dup.row, language),
+    },
+  });
 }
 
 /** Remaining assignable stock for a utensil (total − damaged − assigned elsewhere). */
@@ -129,6 +180,7 @@ function serializeSupplyItem(row, lang) {
     id: row.id,
     business_id: row.businessId ?? null,
     is_global: row.isGlobal,
+    parent_supply_item_id: row.parentSupplyItemId ?? null,
     type: row.type,
     category: row.category?.slug ?? row.categorySlug,
     name: resolveLocalizedName(row.name, lang),
@@ -191,6 +243,7 @@ async function listSupplyItemCategories(req, res) {
             { isActive: true },
             { deletedAt: null },
             { OR: supplyVisibilityOrBranches(businessId, userId) },
+            hideReplacedGlobalSupply(businessId),
           ],
         },
         select: { categorySlug: true },
@@ -283,17 +336,8 @@ async function createSupplyItem(req, res) {
       userId,
       categorySlug: categoryRow.slug,
       names,
-      language: requestedLanguage,
     });
-    if (dup) {
-      return errorResponse(
-        res,
-        apiMessage("supplyItem.duplicate", requestedLanguage),
-        200,
-        "DUPLICATE",
-        apiMessage("supplyItem.duplicateDetail", requestedLanguage),
-      );
-    }
+    if (dup) return duplicateSupplyResponse(res, dup, requestedLanguage);
 
     const availableCount =
       body.available_count == null
@@ -398,7 +442,12 @@ async function listSupplyItems(req, res) {
     }
 
     const visibilityWhere = {
-      AND: [{ OR: supplyVisibilityOrBranches(businessId, userId) }, { deletedAt: null }, ...filterAnd],
+      AND: [
+        { OR: supplyVisibilityOrBranches(businessId, userId) },
+        { deletedAt: null },
+        hideReplacedGlobalSupply(businessId),
+        ...filterAnd,
+      ],
     };
 
     if (!q) {
@@ -443,6 +492,114 @@ async function listSupplyItems(req, res) {
  * A business "editing" a catalogue utensil only records its own stock for it;
  * the shared row (name, units) is never touched.
  */
+/**
+ * POST /v1/makeSupplyItemOwn/:id — turn a global ingredient or utensil into this
+ * business's own version. The copy is linked to the global item and replaces it in
+ * this business's lists and pickers; other businesses keep the global item. Body
+ * fields are optional overrides (name_i18n, unit_options, default_unit,
+ * available_count, damaged_count, photo_url); anything left out is copied from the
+ * global item, and a utensil's stock carries over from the business's stock record.
+ * If the business already has its own version, that one is returned unchanged.
+ */
+async function makeSupplyItemOwn(req, res) {
+  try {
+    const businessId = req.businessId;
+    const userId = req.user?.userId;
+    const id = req.params.id;
+    const body = req.body || {};
+    const language = getRequestedLanguage(req);
+
+    const global = await prisma.supplyItem.findFirst({
+      where: { id, isActive: true, deletedAt: null, OR: supplyVisibilityOrBranches(businessId, userId) },
+      include: { category: true },
+    });
+    if (!global) return errorResponse(res, "Supply item not found", 404, "NOT_FOUND");
+    if (!deriveSupplyIsGlobal(global.businessId, global.createdByUserId)) {
+      return errorResponse(res, "Only catalog items can be made your own", 422, "VALIDATION_ERROR");
+    }
+
+    const existingCopy = await prisma.supplyItem.findFirst({
+      where: { parentSupplyItemId: id, businessId, deletedAt: null, isActive: true },
+      include: { category: true },
+    });
+    if (existingCopy) {
+      return successResponse(res, "Supply item created", serializeSupplyItem(existingCopy, language));
+    }
+
+    const hasNameInput = body.name !== undefined || body.name_i18n !== undefined;
+    const names = hasNameInput ? normalizeLocalizedName(body.name ?? body.name_i18n) : global.name;
+    if (!names) {
+      return errorResponse(res, "All language names are required", 200, "VALIDATION_ERROR");
+    }
+    const unitOptions = Array.isArray(body.unit_options)
+      ? body.unit_options.map((u) => String(u ?? "").trim().toLowerCase()).filter(Boolean)
+      : global.unitOptions ?? [];
+    const defaultUnit =
+      body.default_unit !== undefined
+        ? String(body.default_unit || "").trim().toLowerCase()
+        : global.defaultUnit;
+    if (unitOptions.length === 0) {
+      return errorResponse(res, "unit_options must have at least one unit", 200, "VALIDATION_ERROR");
+    }
+    if (!defaultUnit || !unitOptions.includes(defaultUnit)) {
+      return errorResponse(res, "default_unit must be one of unit_options", 200, "VALIDATION_ERROR");
+    }
+
+    // Only the business's own items can block this; the global item itself is the one being replaced.
+    const dup = await findDuplicateSupplyItem({
+      businessId,
+      userId,
+      categorySlug: global.categorySlug,
+      names,
+      excludeId: id,
+    });
+    if (dup && dup.scope === "own") return duplicateSupplyResponse(res, dup, language);
+
+    let availableCount = null;
+    let damagedCount = 0;
+    if (global.type === "UTENSIL") {
+      const stock = await prisma.businessUtensilStock.findFirst({
+        where: { businessId, supplyItemId: id },
+      });
+      availableCount =
+        body.available_count !== undefined
+          ? body.available_count == null
+            ? null
+            : Math.max(0, parseInt(String(body.available_count), 10) || 0)
+          : stock?.availableCount ?? null;
+      damagedCount =
+        body.damaged_count !== undefined
+          ? Math.max(0, parseInt(String(body.damaged_count ?? 0), 10) || 0)
+          : stock?.damagedCount ?? 0;
+      if (availableCount != null && damagedCount > availableCount) {
+        return errorResponse(res, "damaged_count cannot exceed available_count", 200, "VALIDATION_ERROR");
+      }
+    }
+
+    const row = await prisma.supplyItem.create({
+      data: {
+        businessId,
+        createdByUserId: userId ?? null,
+        isGlobal: false,
+        parentSupplyItemId: id,
+        type: global.type,
+        categorySlug: global.categorySlug,
+        name: names,
+        unitOptions,
+        defaultUnit,
+        availableCount,
+        damagedCount,
+        photoUrl: body.photo_url !== undefined ? body.photo_url : global.photoUrl ?? null,
+      },
+      include: { category: true },
+    });
+    return successResponse(res, "Supply item created", serializeSupplyItem(row, language), 201);
+  } catch (e) {
+    console.error("makeSupplyItemOwn:", e);
+    return errorResponse(res, apiMessage("common.serverError", getRequestedLanguage(req)), 500, "SERVER_ERROR", e.message);
+  }
+}
+
 async function updateSharedUtensilStock(req, res, existing) {
   const businessId = req.businessId;
   const body = req.body || {};
@@ -564,18 +721,10 @@ async function updateSupplyItem(req, res) {
         userId,
         categorySlug: patch.categorySlug ?? existing.categorySlug,
         names: patch.name ?? existing.name,
-        language: requestedLanguage,
-        excludeId: id,
+        // Renaming their own version back to the catalog name isn't a clash.
+        excludeId: existing.parentSupplyItemId ? [id, existing.parentSupplyItemId] : id,
       });
-      if (dup) {
-        return errorResponse(
-          res,
-          apiMessage("supplyItem.duplicate", requestedLanguage),
-          200,
-          "DUPLICATE",
-          apiMessage("supplyItem.duplicateDetail", requestedLanguage),
-        );
-      }
+      if (dup) return duplicateSupplyResponse(res, dup, requestedLanguage);
     }
 
     if (patch.unitOptions && patch.unitOptions.length === 0) {
@@ -1322,6 +1471,11 @@ function deriveMenuIsGlobal(businessId, createdByUserId) {
 }
 
 function canViewMenuItemForSupply(menu, contextBusinessId, userId) {
+  // A business's edited copy of a global item (parentMenuId set) is shared by
+  // everyone in that business, not just the person who made the edit.
+  if (menu.parentMenuId && menu.businessId != null && menu.businessId === contextBusinessId) {
+    return true;
+  }
   if (menu.createdByUserId === userId) return true;
   if (menu.businessId != null && menu.businessId !== contextBusinessId) {
     return false;
@@ -1411,7 +1565,33 @@ function supplyUnitOptionsForRow(src, preferredUnit) {
  * guest/plate) — `scaled = (baseQty / 100) * plates` converts the recipe
  * quantity into the actual amount needed for this event's guest count.
  */
-function computeEventMenuIngredientData(menuItems, guestMul, menuById, language) {
+/**
+ * Global ingredient id -> this business's own version of it. Menu recipes keep
+ * pointing at the global item, so grocery calculations swap in the business's
+ * version; otherwise the list would show "Potato" twice.
+ */
+async function loadSupplyCopyMap(businessId, menuById) {
+  const ids = new Set();
+  for (const menu of menuById.values()) {
+    for (const ing of normalizeMenuIngredients(menu.ingredients)) {
+      const sid = String(ing?.supply_item_id ?? ing?.supplyItemId ?? "").trim();
+      if (sid) ids.add(sid);
+    }
+  }
+  if (!businessId || ids.size === 0) return new Map();
+  const copies = await prisma.supplyItem.findMany({
+    where: {
+      businessId,
+      parentSupplyItemId: { in: [...ids] },
+      deletedAt: null,
+      isActive: true,
+    },
+    select: { id: true, parentSupplyItemId: true },
+  });
+  return new Map(copies.map((c) => [c.parentSupplyItemId, c.id]));
+}
+
+function computeEventMenuIngredientData(menuItems, guestMul, menuById, language, copyBySupplyId = new Map()) {
   /** key = supplyItemId + "\t" + unit -> scaled numeric qty */
   const buckets = new Map();
   const legacy = [];
@@ -1440,7 +1620,8 @@ function computeEventMenuIngredientData(menuItems, guestMul, menuById, language)
     }
     for (const ing of ingredients) {
       const sidRaw = ing?.supply_item_id ?? ing?.supplyItemId;
-      const sid = typeof sidRaw === "string" ? sidRaw.trim() : "";
+      const recipeSid = typeof sidRaw === "string" ? sidRaw.trim() : "";
+      const sid = copyBySupplyId.get(recipeSid) ?? recipeSid;
       const rawQty = ing?.qty ?? ing?.quantity;
       const q = Number(String(rawQty ?? "").trim());
       const baseQty = Number.isFinite(q) && q > 0 ? q : 0;
@@ -1522,7 +1703,14 @@ async function computeMenuItemIngredientBreakdown(
   const visibleMenus = menus.filter((m) => canViewMenuItemForSupply(m, businessId, userId));
   const menuById = new Map(visibleMenus.map((m) => [m.id, m]));
 
-  const { byMenuItem } = computeEventMenuIngredientData(menuItems, guestMul, menuById, language);
+  const copyBySupplyId = await loadSupplyCopyMap(businessId, menuById);
+  const { byMenuItem } = computeEventMenuIngredientData(
+    menuItems,
+    guestMul,
+    menuById,
+    language,
+    copyBySupplyId,
+  );
 
   const supplyIds = [
     ...new Set(
@@ -2046,11 +2234,13 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
     );
     const menuById = new Map(visibleMenus.map((m) => [m.id, m]));
 
+    const copyBySupplyId = await loadSupplyCopyMap(businessId, menuById);
     const { buckets, legacy, byMenuItem } = computeEventMenuIngredientData(
       menuItems,
       guestMul,
       menuById,
       language,
+      copyBySupplyId,
     );
 
     // How many distinct dishes in this event use each ingredient — a saved
@@ -2397,6 +2587,7 @@ async function listUnsavedSupplyEvents(req, res) {
       canViewMenuItemForSupply(m, businessId, userId),
     );
     const menuById = new Map(visibleMenus.map((m) => [m.id, m]));
+    const copyBySupplyId = await loadSupplyCopyMap(businessId, menuById);
 
     const results = [];
     for (const booking of candidateBookings) {
@@ -2418,6 +2609,7 @@ async function listUnsavedSupplyEvents(req, res) {
             guestMul,
             menuById,
             language,
+            copyBySupplyId,
           );
           for (const [key, qty] of buckets.entries()) {
             combined.set(key, (combined.get(key) ?? 0) + qty);
@@ -2792,6 +2984,7 @@ async function getUtensilsInventory(req, res) {
         { OR: supplyVisibilityOrBranches(businessId, userId) },
         { isActive: true },
         { deletedAt: null },
+        hideReplacedGlobalSupply(businessId),
         { type: "UTENSIL" },
       ],
     };
@@ -2945,6 +3138,7 @@ async function generateSupplyListPdf(req, res) {
 
 module.exports = {
   createSupplyItem,
+  makeSupplyItemOwn,
   listSupplyItems,
   listSupplyItemCategories,
   listSupplyUnits,

@@ -571,6 +571,11 @@ model SupplyItem {
   /// Set by admin "force delete": hidden from the catalog and pickers, but the row stays so
   /// bookings and saved lists that already reference it keep resolving its name and unit.
   deletedAt       DateTime?
+  /// Set when a business turns a global item into its own version ("Make it my own").
+  /// The copy replaces the global item for that business only; other businesses keep the global one.
+  parentSupplyItemId String?
+  parentSupplyItem   SupplyItem?  @relation("SupplyItemLineage", fields: [parentSupplyItemId], references: [id], onDelete: SetNull)
+  childCopies        SupplyItem[] @relation("SupplyItemLineage")
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
 
@@ -584,6 +589,7 @@ model SupplyItem {
   @@index([isGlobal])
   @@index([businessId, type, categorySlug, isActive])
   @@index([categorySlug])
+  @@index([parentSupplyItemId])
 }
 
 /// A business's own stock for a shared (catalogue) utensil. Utensils the

@@ -87,6 +87,36 @@ const MESSAGES = {
     hi: "कोई दूसरा नाम चुनें, या सूची में से मौजूदा आइटम चुनें।",
     gu: "અલગ નામ પસંદ કરો, અથવા યાદીમાંથી હાલની આઇટમ પસંદ કરો.",
   },
+  "supplyItem.duplicateGlobal": {
+    en: "This item is already in the catalog",
+    hi: "यह आइटम पहले से कैटलॉग में है",
+    gu: "આ આઇટમ પહેલેથી કેટલોગમાં છે",
+  },
+  "supplyItem.duplicateGlobalDetail": {
+    en: "Use the catalog item, or make it your own to keep your version instead.",
+    hi: "कैटलॉग आइटम इस्तेमाल करें, या इसे अपना बनाकर अपना वर्ज़न रखें।",
+    gu: "કેટલોગ આઇટમ વાપરો, અથવા તેને તમારી બનાવીને તમારું વર્ઝન રાખો.",
+  },
+  "menuItem.duplicate": {
+    en: "You already have a menu item with this name in this category",
+    hi: "इस श्रेणी में इस नाम का मेनू आइटम आपके पास पहले से है",
+    gu: "આ કેટેગરીમાં આ નામની મેનૂ આઇટમ તમારી પાસે પહેલેથી છે",
+  },
+  "menuItem.duplicateDetail": {
+    en: "Choose a different name, or edit the existing item.",
+    hi: "कोई दूसरा नाम चुनें, या मौजूदा आइटम एडिट करें।",
+    gu: "અલગ નામ પસંદ કરો, અથવા હાલની આઇટમ એડિટ કરો.",
+  },
+  "menuItem.duplicateGlobal": {
+    en: "This menu item is already in the catalog",
+    hi: "यह मेनू आइटम पहले से कैटलॉग में है",
+    gu: "આ મેનૂ આઇટમ પહેલેથી કેટલોગમાં છે",
+  },
+  "menuItem.duplicateGlobalDetail": {
+    en: "Use the catalog item, or make it your own to keep your version instead.",
+    hi: "कैटलॉग आइटम इस्तेमाल करें, या इसे अपना बनाकर अपना वर्ज़न रखें।",
+    gu: "કેટલોગ આઇટમ વાપરો, અથવા તેને તમારી બનાવીને તમારું વર્ઝન રાખો.",
+  },
   "menuItem.inUse": {
     en: "This item is used in a booking, quotation, or dish. Deactivate it instead.",
     hi: "यह आइटम किसी बुकिंग, कोटेशन या डिश में उपयोग हो रहा है। इसके बजाय इसे निष्क्रिय करें।",

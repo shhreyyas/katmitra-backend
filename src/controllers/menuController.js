@@ -39,6 +39,11 @@ function deriveIsGlobal(businessId, createdByUserId) {
 
 /** List/detail visibility: own rows always; else business must match when set; unscoped rows use isGlobal / creator rules. */
 function canViewMenuItem(menu, contextBusinessId, userId) {
+  // A business's edited copy of a global item (parentMenuId set) is shared by
+  // everyone in that business, not just the person who made the edit.
+  if (menu.parentMenuId && menu.businessId != null && menu.businessId === contextBusinessId) {
+    return true;
+  }
   if (menu.createdByUserId === userId) {
     return true;
   }
@@ -278,6 +283,46 @@ function formatMenuItem(
   return base;
 }
 
+/** Lower-cased, trimmed names in every language a row has. */
+function menuNameVariants(names) {
+  if (!names || typeof names !== "object") return new Set();
+  return new Set(
+    Object.values(names)
+      .map((v) => String(v ?? "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+/**
+ * A new menu item may not reuse a name (in any language) already used in the same
+ * category by an item this user can see. Returns `{ row, scope }` preferring the
+ * business's own item, scope "own" or "global"; null when there's no clash. A global
+ * item the business has already replaced with its own version is not counted twice.
+ */
+async function findDuplicateMenuItem({ businessId, userId, categorySlug, names }) {
+  const wanted = menuNameVariants(names);
+  if (wanted.size === 0) return null;
+  const rows = await prisma.menuItem.findMany({
+    where: {
+      categorySlug,
+      deletedAt: null,
+      OR: [
+        { businessId, OR: [{ isGlobal: true }, { createdByUserId: userId }] },
+        { businessId: null, OR: [{ createdByUserId: userId }, { isGlobal: true }] },
+        { createdByUserId: userId },
+        { businessId, parentMenuId: { not: null } },
+      ],
+      NOT: { childCopies: { some: { businessId, deletedAt: null } } },
+    },
+    include: { category: true },
+  });
+  const clashes = rows.filter((r) => [...menuNameVariants(r.name)].some((n) => wanted.has(n)));
+  if (clashes.length === 0) return null;
+  const own = clashes.find((r) => !deriveIsGlobal(r.businessId, r.createdByUserId));
+  if (own) return { row: own, scope: "own" };
+  return { row: clashes[0], scope: "global" };
+}
+
 exports.createMenuItem = async (req, res) => {
   try {
     const requestedLanguage = getRequestedLanguage(req);
@@ -467,6 +512,35 @@ exports.createMenuItem = async (req, res) => {
       resolvedHowToMake = trimmed === "" ? null : trimmed;
     }
 
+    const dup = await findDuplicateMenuItem({
+      businessId,
+      userId,
+      categorySlug: categoryRow.slug,
+      names: normalizedName,
+    });
+    if (dup?.scope === "own") {
+      return errorResponse(
+        res,
+        apiMessage("menuItem.duplicate", requestedLanguage),
+        200,
+        "DUPLICATE",
+        apiMessage("menuItem.duplicateDetail", requestedLanguage),
+      );
+    }
+    if (dup) {
+      // The app offers "Use catalog item", or "Make it my own", which saves this form as
+      // an edit of the catalog item (updateMenuItem's copy-on-edit) under `existing._id`.
+      return res.status(200).json({
+        success: false,
+        message: apiMessage("menuItem.duplicateGlobal", requestedLanguage),
+        error: {
+          code: "DUPLICATE_GLOBAL",
+          message: apiMessage("menuItem.duplicateGlobalDetail", requestedLanguage),
+          existing: formatMenuItem(dup.row, { includeFinancials: false, language: requestedLanguage }),
+        },
+      });
+    }
+
     const created = await prisma.menuItem.create({
       data: {
         name: normalizedName,
@@ -523,6 +597,8 @@ exports.listMenuItems = async (req, res) => {
         OR: [{ createdByUserId: userId }, { isGlobal: true }],
       },
       { createdByUserId: userId },
+      // Edited copies of global items are shared across the business (see canViewMenuItem).
+      { businessId, parentMenuId: { not: null } },
     ];
 
     const searchTerm = String(search ?? q ?? "").trim();
@@ -600,8 +676,8 @@ exports.listMenuItems = async (req, res) => {
       }
     }
     if (selfOnly) {
-      // "Self" tab should only show user-created private items.
-      filterAnd.push({ createdByUserId: userId });
+      // "Self" tab: this user's private items plus the business's edited copies of global items.
+      filterAnd.push({ OR: [{ createdByUserId: userId }, { parentMenuId: { not: null } }] });
       filterAnd.push({ isGlobal: false });
       filterAnd.push({ businessId });
     } else if (excludeSelf) {
@@ -635,10 +711,11 @@ exports.listMenuItems = async (req, res) => {
       filterAnd.push({ OR: searchOr });
     }
 
-    // A global item this user has edited is replaced by their private copy (see the fork in
-    // updateMenuItem), so the original is left out for them; other businesses still see it.
+    // A global item this business has edited is replaced by its copy (see the fork in
+    // updateMenuItem), so the original is left out for the whole business; other businesses
+    // still see it.
     const hideReplacedGlobals = {
-      NOT: { childCopies: { some: { businessId, createdByUserId: userId, deletedAt: null } } },
+      NOT: { childCopies: { some: { businessId, deletedAt: null } } },
     };
 
     // Admin force-deleted items stay in the table for existing bookings but are no longer offered.
@@ -786,7 +863,13 @@ exports.updateMenuItem = async (req, res) => {
     }
 
     const dgMenu = deriveIsGlobal(menu.businessId, menu.createdByUserId);
-    if (!dgMenu && menu.createdByUserId != null && menu.createdByUserId !== userId) {
+    const isBusinessCopy = Boolean(menu.parentMenuId) && menu.businessId === businessId;
+    if (
+      !dgMenu &&
+      !isBusinessCopy &&
+      menu.createdByUserId != null &&
+      menu.createdByUserId !== userId
+    ) {
       return errorResponse(
         res,
         "You do not have permission to update this item.",
@@ -821,7 +904,11 @@ exports.updateMenuItem = async (req, res) => {
           "name must be a non-empty string or localized object.",
         );
       }
-      updates.name = normalizedName;
+      // Editors send the name shown in the current language as a plain string; when it
+      // matches one of the item's names it is unchanged, so keep every translation.
+      const current = menuNameVariants(menu.name);
+      const unchanged = [...menuNameVariants(normalizedName)].every((n) => current.has(n));
+      if (!unchanged) updates.name = normalizedName;
     }
     if (price_per_person !== undefined) {
       const price = Number(price_per_person);
@@ -990,7 +1077,8 @@ exports.updateMenuItem = async (req, res) => {
 
     if (deriveIsGlobal(menu.businessId, menu.createdByUserId)) {
       const existingFork = await prisma.menuItem.findFirst({
-        where: { parentMenuId: menu.id, businessId, createdByUserId: userId },
+        // One copy per business: a teammate editing the same global item updates the existing copy.
+        where: { parentMenuId: menu.id, businessId, deletedAt: null },
       });
 
       if (existingFork) {

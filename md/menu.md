@@ -29,8 +29,11 @@ The menu system has two visibility tiers. The app must handle them differently a
 |---|---|---|---|
 | **Global** | All users | No — edit triggers a private copy | No |
 | **Private (My Menu)** | Creator only | Yes | Yes |
+| **Edited copy of a global item** | Everyone in the business | Yes, by anyone in the business | Yes, by anyone in the business |
 
-> A private copy is created automatically by the backend when a user edits a global item. The original global item is never modified.
+> A copy is created automatically by the backend when a user edits a global item. The original global item is never modified. There is one copy per business: a teammate editing the same global item updates that copy. Once a business has a copy, the original global item is hidden from that business's lists, search and pickers (other businesses still see it). Deleting the copy brings the original back.
+
+> Creating a menu item whose name (in any language) matches one already in the same category is refused. If the match is the business's own item the code is `DUPLICATE`; if it is a catalog item the code is `DUPLICATE_GLOBAL` and `error.existing` carries that item, so the app can offer "Use catalog item" or "Make it my own" (which saves the form as an edit of the catalog item, creating the business's copy). Ingredients and utensils follow the same rule, with `POST /v1/makeSupplyItemOwn/:id` creating the business's own version (linked through `SupplyItem.parentSupplyItemId`).
 
 ---
 
@@ -335,7 +338,7 @@ Chips allow multiple filters to be combined (e.g. My Items + Veg).
 |---|---|
 | Global menu | Read-only; edit triggers a private copy |
 | My menu | Fully editable and deletable |
-| Other users' items | Never visible — filtered server-side |
+| Other users' items | Never visible — filtered server-side, except edited copies of global items, which the whole business shares |
 | Business context | `x-business-id` header required on every API call |
 
 ---

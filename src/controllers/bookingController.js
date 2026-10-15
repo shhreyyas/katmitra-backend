@@ -30,6 +30,11 @@ function deriveIsGlobal(businessId, createdByUserId) {
 }
 
 function canViewMenuItem(menu, contextBusinessId, userId) {
+  // A business's edited copy of a global item (parentMenuId set) is shared by
+  // everyone in that business, not just the person who made the edit.
+  if (menu.parentMenuId && menu.businessId != null && menu.businessId === contextBusinessId) {
+    return true;
+  }
   if (menu.createdByUserId === userId) {
     return true;
   }

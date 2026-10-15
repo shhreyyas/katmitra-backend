@@ -4,6 +4,7 @@ const authMiddleware = require("../middleware/authMiddleware");
 const businessContextMiddleware = require("../middleware/businessContextMiddleware");
 const {
   createSupplyItem,
+  makeSupplyItemOwn,
   listSupplyItems,
   listSupplyItemCategories,
   listSupplyUnits,
@@ -47,6 +48,12 @@ router.post(
   authMiddleware,
   businessContextMiddleware,
   createSupplyItem,
+);
+router.post(
+  "/v1/makeSupplyItemOwn/:id",
+  authMiddleware,
+  businessContextMiddleware,
+  makeSupplyItemOwn,
 );
 router.get(
   "/v1/listSupplyItems",
