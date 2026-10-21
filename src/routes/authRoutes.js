@@ -5,6 +5,8 @@ const {
   verifyOtp,
   signIn,
   googleSignIn,
+  facebookSignIn,
+  linkSocialAccount,
   signOut,
   resendOtp,
   forgotPassword,
@@ -24,6 +26,7 @@ router.post("/v1/signup", signup);
 router.post("/v1/verify-otp", verifyOtp);
 router.post("/v1/signin", signIn);
 router.post("/v1/google-signin", googleSignIn);
+router.post("/v1/facebook-signin", facebookSignIn);
 router.post("/v1/resend-otp", resendOtp);
 router.post("/v1/forgot-password", forgotPassword);
 router.post("/v1/verify-forgot-otp", verifyForgotOtp);
@@ -35,6 +38,7 @@ router.patch("/v1/user/notification", authMiddleware, updateNotificationPreferen
 router.patch("/v1/user/notification-update", authMiddleware, updateNotificationSettings);
 router.post("/v1/upload-profile-image", authMiddleware, uploadProfileImage);
 router.patch("/v1/user/profile", authMiddleware, updateUserProfile);
+router.post("/v1/user/link-social", authMiddleware, linkSocialAccount);
 router.post("/v1/delete-user", deleteUser);
 
 // User notifications

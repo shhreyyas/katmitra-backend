@@ -1,12 +1,14 @@
 const prisma = require("../config/prisma");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 const { successResponse, errorResponse } = require("../utils/response");
 const { sendOtpEmail } = require("../utils/email");
 const { logActivity } = require("../utils/activityLog");
 const {
   formatUserResponse,
+  linkedAccounts,
   validatePdfPrefix,
 } = require("../utils/formatUser");
 const { SUPPORTED_LANGUAGE_CODES } = require("../utils/localization");
@@ -365,11 +367,12 @@ exports.signIn = async (req, res) => {
     }
 
     if (!user.passwordHash) {
+      const usesGoogle = Boolean(user.googleId);
       return errorResponse(
         res,
-        "This account uses Google sign-in. Continue with Google, or use Forgot Password to set a password.",
+        `This account uses ${usesGoogle ? "Google" : "Facebook"} sign-in. Continue with ${usesGoogle ? "Google" : "Facebook"}, or use Forgot Password to set a password.`,
         200,
-        "GOOGLE_ACCOUNT",
+        usesGoogle ? "GOOGLE_ACCOUNT" : "FACEBOOK_ACCOUNT",
       );
     }
 
@@ -502,6 +505,239 @@ exports.signIn = async (req, res) => {
   }
 };
 
+const SOCIAL_PROVIDERS = {
+  google: { idField: "googleId", label: "Google" },
+  facebook: { idField: "facebookId", label: "Facebook" },
+};
+
+/**
+ * Shared tail of Google/Facebook sign-in once the provider token is verified.
+ * Looks up by provider id, then by email (case-insensitive) and links it;
+ * unknown emails get a new verified owner account with no password.
+ */
+async function completeSocialSignIn(
+  res,
+  { provider, providerId, email: rawEmail, name, picture, device_type, device_token, language },
+) {
+  const { idField, label } = SOCIAL_PROVIDERS[provider];
+  const email = rawEmail.toLowerCase();
+
+  let user =
+    (await prisma.user.findUnique({ where: { [idField]: providerId } })) ||
+    (await prisma.user.findFirst({
+      where: { email: { equals: email, mode: "insensitive" } },
+    }));
+
+  if (user?.deletedAt) {
+    return errorResponse(res, "Account not found", 200, "USER_NOT_FOUND");
+  }
+
+  // Admin accounts sign in with a password only, so a linked social account can never grant admin access.
+  if (user?.role === "admin") {
+    return errorResponse(
+      res,
+      "Admin accounts must sign in with email and password.",
+      200,
+      "SOCIAL_SIGNIN_NOT_ALLOWED",
+    );
+  }
+
+  let isNewUser = false;
+  const notificationStatus = notificationStatusFromDeviceToken(device_token);
+  const deviceData = {
+    notificationStatus,
+    deviceToken: device_token ?? null,
+    deviceType: device_type,
+  };
+
+  if (!user) {
+    isNewUser = true;
+    user = await prisma.user.create({
+      data: {
+        name: name || email.split("@")[0],
+        email,
+        [idField]: providerId,
+        authProvider: provider,
+        profileImageUrl: picture ?? null,
+        isVerified: true,
+        userVerifiedAt: new Date(),
+        ...(SUPPORTED_LANGUAGE_CODES.has(language) ? { language } : {}),
+        ...deviceData,
+      },
+    });
+  } else {
+    const linking = !user[idField];
+    user = await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        ...deviceData,
+        sessionVersion: { increment: 1 },
+        ...(linking ? { [idField]: providerId } : {}),
+        ...(linking && provider === "google"
+          ? { authProvider: user.passwordHash ? "both" : "google" }
+          : {}),
+        // The provider has confirmed this email, so a pending OTP verification is no longer needed.
+        ...(!user.isVerified ? { isVerified: true, userVerifiedAt: new Date() } : {}),
+        ...(!user.profileImageUrl && picture ? { profileImageUrl: picture } : {}),
+      },
+    });
+  }
+
+  const business_details = await loadBusinessDetailsArray(user.businessId);
+
+  const token = jwt.sign(
+    {
+      userId: user.id,
+      businessId: user.businessId,
+      role: user.role,
+      sessionVersion: user.sessionVersion,
+    },
+    process.env.JWT_SECRET,
+    signInTokenOptions(user.role, device_type),
+  );
+
+  const formattedUser = formatUserResponse(user, {
+    status: 1,
+    device_type,
+    device_token: device_token || null,
+    business_details,
+  });
+
+  logActivity({
+    type: `${provider}_${isNewUser ? "signup" : "login"}`,
+    message: `${label} ${isNewUser ? "signup" : "login"}: ${user.email}`,
+    actorUserId: user.id,
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Login successful",
+    data: {
+      token,
+      user: formattedUser,
+      is_new_user: isNewUser,
+    },
+  });
+}
+
+/** Verifies a Google ID token for our client ID; returns the payload, or null if invalid/unverified. */
+async function verifyGoogleIdToken(idToken) {
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: process.env.GOOGLE_WEB_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    return payload?.sub && payload.email && payload.email_verified ? payload : null;
+  } catch (verifyErr) {
+    console.error("Google token verification failed:", verifyErr.message);
+    return null;
+  }
+}
+
+/**
+ * Verifies a Facebook user access token belongs to our Meta app, then reads the
+ * user's profile. Returns null when the token is invalid or for another app.
+ */
+async function fetchFacebookProfile(accessToken) {
+  const appId = process.env.FB_APP_ID;
+  const appToken = `${appId}|${process.env.FB_APP_SECRET}`;
+  const graph = "https://graph.facebook.com";
+  const timeout = () => AbortSignal.timeout(10000);
+
+  const debugRes = await fetch(
+    `${graph}/debug_token?input_token=${encodeURIComponent(accessToken)}&access_token=${encodeURIComponent(appToken)}`,
+    { signal: timeout() },
+  );
+  const debug = (await debugRes.json())?.data;
+  if (!debug?.is_valid || String(debug.app_id) !== String(appId) || !debug.user_id) {
+    return null;
+  }
+
+  const proof = crypto
+    .createHmac("sha256", process.env.FB_APP_SECRET)
+    .update(accessToken)
+    .digest("hex");
+  const meRes = await fetch(
+    `${graph}/me?fields=id,name,email,picture.type(large)&access_token=${encodeURIComponent(accessToken)}&appsecret_proof=${proof}`,
+    { signal: timeout() },
+  );
+  const me = await meRes.json();
+  if (!me?.id || String(me.id) !== String(debug.user_id)) return null;
+
+  const pic = me.picture?.data;
+  return {
+    id: String(me.id),
+    name: me.name,
+    email: me.email,
+    picture: pic && !pic.is_silhouette ? pic.url : null,
+  };
+}
+
+/**
+ * POST /v1/facebook-signin
+ *
+ * Same flow as Google sign-in, with a Facebook user access token. Facebook
+ * accounts without a shared email are rejected (FACEBOOK_EMAIL_REQUIRED) so every
+ * account keeps a real email for OTP and password reset.
+ */
+exports.facebookSignIn = async (req, res) => {
+  try {
+    const { access_token, device_type, device_token, language } = req.body;
+
+    if (!access_token || device_type === undefined) {
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    if (!process.env.FB_APP_ID || !process.env.FB_APP_SECRET) {
+      console.error("Facebook sign-in error: FB_APP_ID / FB_APP_SECRET is not set");
+      return errorResponse(res, "Server error", 500, "ERROR");
+    }
+
+    let profile;
+    try {
+      profile = await fetchFacebookProfile(access_token);
+    } catch (verifyErr) {
+      console.error("Facebook token verification failed:", verifyErr.message);
+      profile = null;
+    }
+    if (!profile) {
+      return errorResponse(res, "Facebook sign-in failed", 200, "INVALID_FACEBOOK_TOKEN");
+    }
+
+    if (!profile.email) {
+      return errorResponse(
+        res,
+        "Your Facebook account did not share an email address. Allow email access, or sign up with Google or email.",
+        200,
+        "FACEBOOK_EMAIL_REQUIRED",
+      );
+    }
+
+    return await completeSocialSignIn(res, {
+      provider: "facebook",
+      providerId: profile.id,
+      email: profile.email,
+      name: profile.name,
+      picture: profile.picture,
+      device_type,
+      device_token,
+      language,
+    });
+  } catch (error) {
+    console.error("Facebook sign-in error:", error.message);
+    if (error.code === "P2002") {
+      return errorResponse(res, "Email already registered.", 200, "USER_EXISTS");
+    }
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
 /**
  * POST /v1/google-signin
  *
@@ -528,116 +764,120 @@ exports.googleSignIn = async (req, res) => {
       return errorResponse(res, "Server error", 500, "ERROR");
     }
 
-    let payload;
-    try {
-      const ticket = await googleClient.verifyIdToken({
-        idToken: id_token,
-        audience: process.env.GOOGLE_WEB_CLIENT_ID,
-      });
-      payload = ticket.getPayload();
-    } catch (verifyErr) {
-      console.error("Google token verification failed:", verifyErr.message);
+    const payload = await verifyGoogleIdToken(id_token);
+    if (!payload) {
       return errorResponse(res, "Google sign-in failed", 200, "INVALID_GOOGLE_TOKEN");
     }
 
-    if (!payload?.sub || !payload.email || !payload.email_verified) {
-      return errorResponse(res, "Google sign-in failed", 200, "INVALID_GOOGLE_TOKEN");
-    }
-
-    const googleId = payload.sub;
-    const email = payload.email.toLowerCase();
-
-    let user =
-      (await prisma.user.findUnique({ where: { googleId } })) ||
-      (await prisma.user.findFirst({
-        where: { email: { equals: email, mode: "insensitive" } },
-      }));
-
-    if (user?.deletedAt) {
-      return errorResponse(res, "Account not found", 200, "USER_NOT_FOUND");
-    }
-
-    let isNewUser = false;
-    const notificationStatus = notificationStatusFromDeviceToken(device_token);
-    const deviceData = {
-      notificationStatus,
-      deviceToken: device_token ?? null,
-      deviceType: device_type,
-    };
-
-    if (!user) {
-      isNewUser = true;
-      user = await prisma.user.create({
-        data: {
-          name: payload.name || email.split("@")[0],
-          email,
-          googleId,
-          authProvider: "google",
-          profileImageUrl: payload.picture ?? null,
-          isVerified: true,
-          userVerifiedAt: new Date(),
-          ...(SUPPORTED_LANGUAGE_CODES.has(language) ? { language } : {}),
-          ...deviceData,
-        },
-      });
-    } else {
-      const linking = !user.googleId;
-      user = await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          ...deviceData,
-          sessionVersion: { increment: 1 },
-          ...(linking
-            ? { googleId, authProvider: user.passwordHash ? "both" : "google" }
-            : {}),
-          // Google has verified this email, so a pending OTP verification is no longer needed.
-          ...(!user.isVerified ? { isVerified: true, userVerifiedAt: new Date() } : {}),
-          ...(!user.profileImageUrl && payload.picture
-            ? { profileImageUrl: payload.picture }
-            : {}),
-        },
-      });
-    }
-
-    const business_details = await loadBusinessDetailsArray(user.businessId);
-
-    const token = jwt.sign(
-      {
-        userId: user.id,
-        businessId: user.businessId,
-        role: user.role,
-        sessionVersion: user.sessionVersion,
-      },
-      process.env.JWT_SECRET,
-      signInTokenOptions(user.role, device_type),
-    );
-
-    const formattedUser = formatUserResponse(user, {
-      status: 1,
+    return await completeSocialSignIn(res, {
+      provider: "google",
+      providerId: payload.sub,
+      email: payload.email,
+      name: payload.name,
+      picture: payload.picture,
       device_type,
-      device_token: device_token || null,
-      business_details,
-    });
-
-    logActivity({
-      type: isNewUser ? "google_signup" : "google_login",
-      message: `Google ${isNewUser ? "signup" : "login"}: ${user.email}`,
-      actorUserId: user.id,
-    });
-
-    return res.status(200).json({
-      success: true,
-      message: "Login successful",
-      data: {
-        token,
-        user: formattedUser,
-        is_new_user: isNewUser,
-      },
+      device_token,
+      language,
     });
   } catch (error) {
     console.error("Google sign-in error:", error.message);
     if (error.code === "P2002") {
       return errorResponse(res, "Email already registered.", 200, "USER_EXISTS");
+    }
+    return errorResponse(res, "Server error", 500, "ERROR");
+  }
+};
+
+/**
+ * POST /v1/user/link-social  (requires auth)
+ *
+ * Connects a Google or Facebook account to the signed-in user, even when its
+ * email differs from the KatMitra email. A provider account already linked to a
+ * different user is rejected, so this never merges two KatMitra accounts.
+ */
+exports.linkSocialAccount = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { provider, token } = req.body;
+    const config = SOCIAL_PROVIDERS[provider];
+
+    if (!config || !token) {
+      return errorResponse(
+        res,
+        "One or more required fields are missing or malformed",
+        200,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    let providerId = null;
+    if (provider === "google") {
+      providerId = (await verifyGoogleIdToken(token))?.sub ?? null;
+    } else {
+      try {
+        providerId = (await fetchFacebookProfile(token))?.id ?? null;
+      } catch (verifyErr) {
+        console.error("Facebook token verification failed:", verifyErr.message);
+      }
+    }
+    if (!providerId) {
+      return errorResponse(
+        res,
+        `${config.label} sign-in failed`,
+        200,
+        provider === "google" ? "INVALID_GOOGLE_TOKEN" : "INVALID_FACEBOOK_TOKEN",
+      );
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user || user.deletedAt) {
+      return errorResponse(res, "Account not found", 200, "USER_NOT_FOUND");
+    }
+    if (user.role === "admin") {
+      return errorResponse(
+        res,
+        "Admin accounts must sign in with email and password.",
+        200,
+        "SOCIAL_SIGNIN_NOT_ALLOWED",
+      );
+    }
+
+    const owner = await prisma.user.findUnique({ where: { [config.idField]: providerId } });
+    if (owner && owner.id !== user.id) {
+      return errorResponse(
+        res,
+        `This ${config.label} account is already connected to another KatMitra account.`,
+        200,
+        "PROVIDER_ALREADY_LINKED",
+      );
+    }
+
+    const updated =
+      user[config.idField] === providerId
+        ? user
+        : await prisma.user.update({
+            where: { id: user.id },
+            data: { [config.idField]: providerId },
+          });
+
+    logActivity({
+      type: `${provider}_linked`,
+      message: `${config.label} connected: ${updated.email}`,
+      actorUserId: updated.id,
+    });
+
+    return successResponse(res, `${config.label} connected`, {
+      linked_accounts: linkedAccounts(updated),
+    });
+  } catch (error) {
+    console.error("Link social account error:", error.message);
+    if (error.code === "P2002") {
+      return errorResponse(
+        res,
+        "This account is already connected to another KatMitra account.",
+        200,
+        "PROVIDER_ALREADY_LINKED",
+      );
     }
     return errorResponse(res, "Server error", 500, "ERROR");
   }

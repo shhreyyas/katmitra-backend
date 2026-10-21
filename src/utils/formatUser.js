@@ -34,6 +34,15 @@ function validatePdfPrefix(value) {
   return /^[A-Za-z0-9\-_]+$/.test(trimmed);
 }
 
+/** Which sign-in methods the user can use; the app nudges password-only users to connect one. */
+function linkedAccounts(user) {
+  return {
+    password: Boolean(user.passwordHash),
+    google: Boolean(user.googleId),
+    facebook: Boolean(user.facebookId),
+  };
+}
+
 function formatUserResponse(user, overrides = {}) {
   const businessName = businessNameFromOverrides(overrides);
   return {
@@ -51,11 +60,13 @@ function formatUserResponse(user, overrides = {}) {
     deleted_at: user.deletedAt ?? null,
     role: user.role,
     language: user.language,
+    linked_accounts: linkedAccounts(user),
     ...overrides,
   };
 }
 
 module.exports = {
+  linkedAccounts,
   LEGACY_UNSET_PDF_PREFIX,
   deriveDefaultPdfPrefix,
   isUnsetPdfPrefix,

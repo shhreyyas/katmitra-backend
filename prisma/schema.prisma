@@ -152,7 +152,10 @@ model User {
   passwordHash       String?
   /// Google account "sub"; set when the user signs in with Google.
   googleId           String?   @unique
-  /// "email", "google", or "both" (password + linked Google account).
+  /// App-scoped Facebook user id; set when the user signs in with Facebook.
+  facebookId         String?   @unique
+  /// How the account was first created: "email", "google", "facebook" ("both" = legacy email+Google link).
+  /// Which sign-in methods work is derived from passwordHash / googleId / facebookId.
   authProvider       String    @default("email")
   phoneNumber        String?
   profileImageUrl    String?
