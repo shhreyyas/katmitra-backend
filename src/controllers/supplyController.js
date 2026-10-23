@@ -2243,6 +2243,13 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       language,
       copyBySupplyId,
     );
+    // Recipe rows saved without a quantity drop out of the event totals, so
+    // the screen warns the caterer to fill them in per dish.
+    const missingQtyCount =
+      [...byMenuItem.values()].reduce(
+        (n, item) => n + [...item.rows.values()].filter((r) => !(r.qty_per_plate > 0)).length,
+        0,
+      ) + legacy.filter((l) => !(l.qty > 0)).length;
 
     // How many distinct dishes in this event use each ingredient — a saved
     // per-event override can only be attributed back to a single dish's card
@@ -2290,6 +2297,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
         suggestions: [],
         legacy_without_supply: legacy,
         menu_items: emptyMenuItems,
+        missing_qty_count: missingQtyCount,
         event: buildSuggestedSupplyEventMeta(event, menuItems.length, 0),
         has_saved_ingredients: hasSavedIngredients,
       });
@@ -2448,6 +2456,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       suggestions,
       legacy_without_supply: legacy,
       menu_items,
+      missing_qty_count: missingQtyCount,
       event: buildSuggestedSupplyEventMeta(
         event,
         menuItems.length,
