@@ -21,6 +21,13 @@ const {
 } = require("../utils/businessUtensilStock");
 
 const VALID_TYPES = new Set(["INGREDIENT", "UTENSIL"]);
+/**
+ * `BookingEventSupplyItem.menuItemId` value for an event's extra items —
+ * quantities added on top of the recipes (Booking Supply List, per event).
+ * Never a real menu item id, so these rows are not shadowed by, and never
+ * shadow, a dish's own list or the event-level fallback.
+ */
+const EVENT_EXTRA_SCOPE = "__extra__";
 
 /**
  * Same rule as MenuItem: private only when both business and creator are set.
@@ -1052,12 +1059,16 @@ async function setEventSupplyItems(req, res) {
     // When set, this save replaces only ONE menu item's ingredient list for the
     // event (per-dish override). When absent it's the event-level list (booking
     // wizard / saved-list apply). Utensils are never menu-item scoped.
+    // `scope: "extra"` saves the event's extra items (added on top of the
+    // recipes from the Booking Supply List) into their own scope.
     const menuItemId =
-      itemType === "INGREDIENT" &&
-      typeof body.menu_item_id === "string" &&
-      body.menu_item_id.trim()
-        ? body.menu_item_id.trim()
-        : null;
+      itemType === "INGREDIENT" && body.scope === "extra"
+        ? EVENT_EXTRA_SCOPE
+        : itemType === "INGREDIENT" &&
+            typeof body.menu_item_id === "string" &&
+            body.menu_item_id.trim()
+          ? body.menu_item_id.trim()
+          : null;
     const payload = Array.isArray(body.items) ? body.items : [];
     const booking = await prisma.booking.findFirst({
       where: { id: bookingId, businessId },
@@ -1198,7 +1209,7 @@ async function setEventSupplyItems(req, res) {
       // Saving a menu item's list takes ownership of those supply items from any
       // event-level fallback row, so the two can't double-count in whole-event
       // aggregates.
-      ...(menuItemId && submittedSupplyIds.length
+      ...(menuItemId && menuItemId !== EVENT_EXTRA_SCOPE && submittedSupplyIds.length
         ? [
             prisma.bookingEventSupplyItem.deleteMany({
               where: {
@@ -1351,10 +1362,17 @@ async function getEventSupplyItems(req, res) {
       select: { id: true },
     });
     if (!booking) return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
+    // `?scope=extra` returns only the event's extra items; otherwise they are
+    // left out so a caller that re-saves this list can't copy them into the
+    // event-level scope.
+    const extraOnly = req.query.scope === "extra";
     const rows = await prisma.bookingEventSupplyItem.findMany({
       where: {
         bookingEventId: eventId,
         ...(itemType && VALID_TYPES.has(itemType) ? { itemType } : {}),
+        ...(extraOnly
+          ? { menuItemId: EVENT_EXTRA_SCOPE }
+          : { OR: [{ menuItemId: null }, { NOT: { menuItemId: EVENT_EXTRA_SCOPE } }] }),
       },
       orderBy: { createdAt: "asc" },
     });
@@ -1842,6 +1860,34 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
     const savedIngredientRows = savedByEventAndType.get(`${event.id}\tINGREDIENT`) ?? [];
     const savedUtensilRows = savedByEventAndType.get(`${event.id}\tUTENSIL`) ?? [];
 
+    // A dish-scoped saved row for one of that dish's own recipe ingredients
+    // is the caterer's edited quantity. When it is above the recipe amount
+    // the difference is printed as "Extra" on top of the recipe quantity
+    // (Recipe 2 kg + Extra 3 kg = 5 kg). A lower saved value is ignored so a
+    // save made before a guest-count increase can't shrink the list.
+    const savedByDishAndSupply = new Map();
+    // Extras saved for this event always print as Extra, even for an item the
+    // recipe already has (Recipe 2 kg + Extra 5 kg).
+    const eventExtraRows = savedIngredientRows.filter((row) => row.menuItemId === EVENT_EXTRA_SCOPE);
+    const scopedIngredientRows = savedIngredientRows.filter((row) => row.menuItemId !== EVENT_EXTRA_SCOPE);
+    for (const row of scopedIngredientRows) {
+      if (row.menuItemId) savedByDishAndSupply.set(`${row.menuItemId}\t${row.supplyItemId}`, row);
+    }
+    for (const item of menuItemsBreakdown) {
+      for (const ing of item.ingredients) {
+        const recipeQty = Number(ing.quantity) || 0;
+        ing.recipe_quantity = recipeQty;
+        ing.extra_quantity = 0;
+        const saved = savedByDishAndSupply.get(`${item.menu_item_id}\t${ing.supply_item_id}`);
+        if (!saved) continue;
+        const savedQty = convertSupplyQty(Number(saved.quantity) || 0, saved.unit, ing.unit);
+        if (savedQty > recipeQty) {
+          ing.extra_quantity = Math.round((savedQty - recipeQty) * 1000) / 1000;
+          ing.quantity = savedQty;
+        }
+      }
+    }
+
     // Recipe-derived ingredients are always recomputed from the current
     // guest count (never taken from a saved row) so a stale save from
     // before a guestCount change can't under/over-count the booking-wide
@@ -1858,9 +1904,10 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
     // List screen) that aren't part of any dish's recipe — without this
     // they only ever showed up in the booking-wide totals table, never in
     // this event's own ingredient section.
-    const unmatchedIngredientRows = savedIngredientRows.filter(
-      (row) => !menuDerivedSupplyIds.has(row.supplyItemId),
-    );
+    const unmatchedIngredientRows = [
+      ...scopedIngredientRows.filter((row) => !menuDerivedSupplyIds.has(row.supplyItemId)),
+      ...eventExtraRows,
+    ];
     // A saved row scoped to one of this event's dishes (menuItemId set) is
     // that dish's ingredient even when the dish has no recipe in the menu
     // master — e.g. quantities typed per dish on the order. Keep it under
@@ -1882,12 +1929,18 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
         extraIngredientRows.push(row);
       }
     }
-    const toSavedLine = (row) => ({
+    // `isExtra`: the row was added on top of a recipe (event-level extras, or
+    // a new item on a dish that has a recipe) — printed as "Extra" so it
+    // merges into the matching recipe line as Recipe X + Extra Y.
+    const toSavedLine = (row, isExtra) => ({
+      supply_item_id: row.supplyItemId,
       name: resolveLocalizedName(row.nameSnapshot, language),
       unit: row.unit,
       quantity: row.quantity,
       category_slug: row.categorySlug,
       category_label: supplyCategoryLabelFor(categoryLabelMap, row.categorySlug),
+      recipe_quantity: isExtra ? 0 : row.quantity,
+      extra_quantity: isExtra ? row.quantity : 0,
     });
     const breakdownById = new Map(menuItemsBreakdown.map((item) => [item.menu_item_id, item]));
     // Follow the event's menu order; a dish missing from the recipe
@@ -1905,14 +1958,18 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
         menu_item_id: id,
         name: recipe?.name ?? snapItem.name ?? "",
         ingredients: [
-          ...(recipe?.ingredients ?? []).map(({ name: n, unit, quantity, category_slug, category_label }) => ({
-            name: n,
-            unit,
-            quantity,
-            category_slug,
-            category_label,
-          })),
-          ...saved.map(toSavedLine),
+          ...(recipe?.ingredients ?? []).map(
+            ({ name: n, unit, quantity, category_slug, category_label, recipe_quantity, extra_quantity }) => ({
+              name: n,
+              unit,
+              quantity,
+              category_slug,
+              category_label,
+              recipe_quantity,
+              extra_quantity,
+            }),
+          ),
+          ...saved.map((row) => toSavedLine(row, !!recipe && recipe.ingredients.length > 0)),
         ],
       });
     }
@@ -1920,7 +1977,7 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
     eventsOut.push({
       event_id: event.id,
       menu_items: menuItemsOut,
-      extra_ingredients: extraIngredientRows.map(toSavedLine),
+      extra_ingredients: extraIngredientRows.map((row) => toSavedLine(row, true)),
       utensils: savedUtensilRows.map((row) => ({
         name: resolveLocalizedName(row.nameSnapshot, language),
         quantity: row.quantity,
@@ -2125,8 +2182,17 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
     const guests = Math.max(0, Number(event.guestCount) || 0);
     const guestMul = guests > 0 ? guests : 1;
 
+    // Extras live on the Booking Supply List, not in this recipe-based view —
+    // leaving them out also stops a re-save here from copying them into the
+    // event-level list.
     const savedRows = await prisma.bookingEventSupplyItem.findMany({
-      where: { bookingEventId: eventId, itemType: "INGREDIENT" },
+      // `NOT` alone would also drop NULL (event-level) rows — SQL `<>` is
+      // never true for NULL — so keep them explicitly.
+      where: {
+        bookingEventId: eventId,
+        itemType: "INGREDIENT",
+        OR: [{ menuItemId: null }, { NOT: { menuItemId: EVENT_EXTRA_SCOPE } }],
+      },
       orderBy: { createdAt: "asc" },
     });
     // Per-dish overrides win on their own card; event-level (menuItemId null)
