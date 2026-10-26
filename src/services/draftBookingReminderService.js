@@ -54,7 +54,7 @@ async function _fetchDraftBookings(windowStart, windowEnd, reminderType) {
 }
 
 async function _notify(booking, users, messageId, params, type, reminderType) {
-  const notifData = { screen: "bookingDetails", bookingId: booking.id };
+  const notifData = { screen: "selectEvent", bookingId: booking.id };
 
   let pushResult;
   try {
