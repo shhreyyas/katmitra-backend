@@ -1829,11 +1829,12 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
   const ingredientTotals = new Map();
   const utensilTotals = new Map();
 
-  const addToTotals = (map, key, name, unit, eventId, qty, category) => {
+  /** `extraQty`: the part of `qty` added on top of a recipe (same unit), shown as "+X extra". */
+  const addToTotals = (map, key, name, unit, eventId, qty, category, extraQty = 0) => {
     const n = Number(qty) || 0;
     if (n <= 0 && !includeEmpty) return;
     if (!map.has(key)) {
-      map.set(key, { name, unit, category, perEvent: new Map(), total: 0 });
+      map.set(key, { name, unit, category, perEvent: new Map(), perEventExtra: new Map(), total: 0, extraTotal: 0 });
     }
     const entry = map.get(key);
     // Different events can save the same supply item in different units
@@ -1845,6 +1846,12 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
     const converted = convertSupplyQty(n, unit, entry.unit);
     entry.perEvent.set(eventId, (entry.perEvent.get(eventId) ?? 0) + converted);
     entry.total += converted;
+    const extra = Number(extraQty) || 0;
+    if (extra > 0) {
+      const extraConverted = convertSupplyQty(extra, unit, entry.unit);
+      entry.perEventExtra.set(eventId, (entry.perEventExtra.get(eventId) ?? 0) + extraConverted);
+      entry.extraTotal += extraConverted;
+    }
   };
 
   for (const event of events) {
@@ -1995,10 +2002,21 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
           event.id,
           ing.quantity,
           ing.category_slug,
+          ing.extra_quantity,
         );
       }
     }
+    // Same rule as the per-dish lists above: a row counts as extra unless it
+    // belongs to a dish that has no recipe of its own.
+    const recipeDishIds = new Set(
+      menuItemsBreakdown.filter((item) => item.ingredients.length > 0).map((item) => item.menu_item_id),
+    );
     for (const row of unmatchedIngredientRows) {
+      const ownDishWithoutRecipe =
+        row.menuItemId &&
+        row.menuItemId !== EVENT_EXTRA_SCOPE &&
+        snapshotMenuIds.has(row.menuItemId) &&
+        !recipeDishIds.has(row.menuItemId);
       addToTotals(
         ingredientTotals,
         row.supplyItemId,
@@ -2007,6 +2025,7 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
         event.id,
         row.quantity,
         row.categorySlug,
+        ownDishWithoutRecipe ? 0 : row.quantity,
       );
     }
 
@@ -2034,7 +2053,12 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
         per_event: Object.fromEntries(
           [...e.perEvent.entries()].map(([eid, q]) => [eid, Math.round(q * 100) / 100]),
         ),
+        /** Per event: the part of `per_event` added on top of the recipes. */
+        per_event_extra: Object.fromEntries(
+          [...(e.perEventExtra ?? new Map()).entries()].map(([eid, q]) => [eid, Math.round(q * 100) / 100]),
+        ),
         total: Math.round(e.total * 100) / 100,
+        extra_total: Math.round((e.extraTotal ?? 0) * 100) / 100,
       }))
       .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
 
