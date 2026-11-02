@@ -623,6 +623,11 @@ model BookingSupplyItem {
   /// Fractional for ingredients (1.5 kg); utensils are whole pieces.
   quantity     Float              @default(1)
   unit         String
+  /// True when `quantity` is an extra on top of every event's own amount (the
+  /// "All events" rule since Nov 2026). False marks an older row that stored
+  /// the item's whole-booking total; it's read as max(0, total - events' sum)
+  /// until scripts/convertBookingSupplyItemsToExtras.js rewrites it.
+  isExtra      Boolean            @default(false)
   categorySlug String
   category     SupplyItemCategory @relation(fields: [categorySlug], references: [slug], onDelete: Restrict)
   nameSnapshot Json

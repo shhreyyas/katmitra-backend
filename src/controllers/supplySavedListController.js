@@ -1,14 +1,12 @@
 const prisma = require("../config/prisma");
+const { combineOrderSupplyLines } = require("../utils/bookingSupplyExtras");
 const { successResponse, errorResponse } = require("../utils/response");
 const {
   getRequestedLanguage,
   normalizeLocalizedName,
   resolveLocalizedName,
 } = require("../utils/localization");
-const {
-  buildFullBookingSupplyBreakdown,
-  convertSupplyQty,
-} = require("./supplyController");
+const { buildFullBookingSupplyBreakdown } = require("./supplyController");
 const { resolveFunctionTypeLabel } = require("../utils/functionTypeLabels");
 const { overlayBusinessUtensilStock } = require("../utils/businessUtensilStock");
 
@@ -208,8 +206,8 @@ async function persistAutoSupplyList({
  * Booking-wide ingredient and utensil lines for an order-linked list, from the same
  * breakdown the full booking PDF / Documents sheet use: recipe ingredients
  * recomputed from each event's current guest count, event-level extras not
- * covered by a recipe, plus manually added booking-level items (which
- * replace the calculated figure for the same item). Lines are
+ * covered by a recipe, plus booking-level ("All events") extras added on
+ * top of the events' amounts. Lines are
  * keyed by supply item, converting compatible units (g/kg, ml/l) before
  * summing so 500 g + 2 kg never becomes "502 g".
  */
@@ -220,32 +218,7 @@ async function computeOrderSupplyLines({ businessId, userId, language, bookingId
     userId,
     language,
   });
-  /** supplyItemId -> { quantity, unit } */
-  const combined = new Map();
-  const add = (supplyItemId, quantity, unit) => {
-    const n = Number(quantity) || 0;
-    if (!supplyItemId || n <= 0) return;
-    const prev = combined.get(supplyItemId);
-    if (!prev) {
-      combined.set(supplyItemId, { quantity: n, unit });
-      return;
-    }
-    prev.quantity += convertSupplyQty(n, unit, prev.unit);
-  };
-  // A manually added booking-level row for an item is authoritative over the
-  // auto-calculated figure (same rule as the Booking Supply List screen).
-  const bookingLevel = [...breakdown.booking_level.ingredients, ...breakdown.booking_level.utensils];
-  const manualIds = new Set(bookingLevel.map((r) => r.supply_item_id));
-  for (const row of [...breakdown.totals.ingredients, ...breakdown.totals.utensils]) {
-    if (manualIds.has(row.supply_item_id)) continue;
-    add(row.supply_item_id, row.total, row.unit);
-  }
-  for (const row of bookingLevel) add(row.supply_item_id, row.quantity, row.unit);
-  return [...combined.entries()].map(([supply_item_id, v]) => ({
-    supply_item_id,
-    quantity: v.quantity,
-    unit: v.unit,
-  }));
+  return combineOrderSupplyLines(breakdown);
 }
 
 /**
@@ -320,13 +293,13 @@ async function syncOrderSupplyList({ list, businessId, userId, language }) {
     const ids = [...new Set(lines.map((l) => l.supply_item_id))];
     const supplyRows = ids.length
       ? await prisma.supplyItem.findMany({
-          where: {
-            id: { in: ids },
-            isActive: true,
-            ...VALID_TYPES_FILTER,
-            OR: supplyVisibilityOrBranches(businessId, userId),
-          },
-        })
+        where: {
+          id: { in: ids },
+          isActive: true,
+          ...VALID_TYPES_FILTER,
+          OR: supplyVisibilityOrBranches(businessId, userId),
+        },
+      })
       : [];
     const byId = new Map(supplyRows.map((r) => [r.id, r]));
     const validLines = lines.filter((l) => byId.has(l.supply_item_id));

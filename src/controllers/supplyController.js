@@ -1,4 +1,9 @@
 const prisma = require("../config/prisma");
+const {
+  convertSupplyQty,
+  bookingLevelExtraQty,
+  eventsTotalByIdFromTotals,
+} = require("../utils/bookingSupplyExtras");
 const { resolveFunctionTypeLabel } = require("../utils/functionTypeLabels");
 const { successResponse, errorResponse } = require("../utils/response");
 const { renderSupplyPdfBuffer } = require("../utils/renderSupplyPdfBuffer");
@@ -308,8 +313,8 @@ async function createSupplyItem(req, res) {
     }
     const unitOptions = Array.isArray(body.unit_options)
       ? body.unit_options
-          .map((u) => String(u ?? "").trim().toLowerCase())
-          .filter(Boolean)
+        .map((u) => String(u ?? "").trim().toLowerCase())
+        .filter(Boolean)
       : [];
     const defaultUnit = String(body.default_unit || "").trim().toLowerCase();
     if (unitOptions.length === 0) {
@@ -685,16 +690,16 @@ async function updateSupplyItem(req, res) {
         : {}),
       ...(body.available_count !== undefined
         ? {
-            availableCount:
-              body.available_count == null
-                ? null
-                : Math.max(0, Number(body.available_count) || 0),
-          }
+          availableCount:
+            body.available_count == null
+              ? null
+              : Math.max(0, Number(body.available_count) || 0),
+        }
         : {}),
       ...(body.damaged_count !== undefined && existing.type === "UTENSIL"
         ? {
-            damagedCount: Math.max(0, Number(body.damaged_count) || 0),
-          }
+          damagedCount: Math.max(0, Number(body.damaged_count) || 0),
+        }
         : {}),
       ...(body.photo_url !== undefined ? { photoUrl: body.photo_url } : {}),
     };
@@ -916,6 +921,10 @@ async function setBookingSupplyItems(req, res) {
     const userId = req.user?.userId;
     const bookingId = req.params.id;
     const payload = Array.isArray(req.body?.items) ? req.body.items : [];
+    // `scope: "extra"` (current app): quantities are extras on top of the
+    // events' own amounts. Without it (older app builds) they're whole-booking
+    // totals, kept as isExtra=false and read via bookingLevelExtraQty.
+    const isExtra = req.body?.scope === "extra";
     const booking = await prisma.booking.findFirst({
       where: { id: bookingId, businessId },
       select: { id: true, status: true },
@@ -994,6 +1003,7 @@ async function setBookingSupplyItems(req, res) {
         supplyItemId: source.id,
         quantity: qty,
         unit: String(row.unit || source.defaultUnit || "pcs"),
+        isExtra,
         categorySlug: source.categorySlug,
         nameSnapshot: source.name,
       };
@@ -1025,10 +1035,25 @@ async function getBookingSupplyItems(req, res) {
       select: { id: true },
     });
     if (!booking) return errorResponse(res, apiMessage("booking.notFound", getRequestedLanguage(req)), 404, "NOT_FOUND");
-    const rows = await prisma.bookingSupplyItem.findMany({
+    const allRows = await prisma.bookingSupplyItem.findMany({
       where: { bookingId },
       orderBy: { createdAt: "asc" },
     });
+    // Quantities are always extras on top of the events' amounts; rows still
+    // holding an older whole-booking total need the events' sum to convert.
+    let eventsTotalById = new Map();
+    if (allRows.some((row) => !row.isExtra)) {
+      const breakdown = await buildFullBookingSupplyBreakdown({
+        bookingId,
+        businessId,
+        userId: req.user?.userId,
+        language: lang,
+      });
+      eventsTotalById = eventsTotalByIdFromTotals(breakdown.totals);
+    }
+    const rows = allRows
+      .map((row) => ({ ...row, quantity: bookingLevelExtraQty(row, eventsTotalById) }))
+      .filter((row) => row.quantity > 0);
     return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), {
       items: rows.map((row) => ({
         supply_item_id: row.supplyItemId,
@@ -1065,8 +1090,8 @@ async function setEventSupplyItems(req, res) {
       itemType === "INGREDIENT" && body.scope === "extra"
         ? EVENT_EXTRA_SCOPE
         : itemType === "INGREDIENT" &&
-            typeof body.menu_item_id === "string" &&
-            body.menu_item_id.trim()
+          typeof body.menu_item_id === "string" &&
+          body.menu_item_id.trim()
           ? body.menu_item_id.trim()
           : null;
     const payload = Array.isArray(body.items) ? body.items : [];
@@ -1211,15 +1236,15 @@ async function setEventSupplyItems(req, res) {
       // aggregates.
       ...(menuItemId && menuItemId !== EVENT_EXTRA_SCOPE && submittedSupplyIds.length
         ? [
-            prisma.bookingEventSupplyItem.deleteMany({
-              where: {
-                bookingEventId: eventId,
-                itemType,
-                menuItemId: null,
-                supplyItemId: { in: submittedSupplyIds },
-              },
-            }),
-          ]
+          prisma.bookingEventSupplyItem.deleteMany({
+            where: {
+              bookingEventId: eventId,
+              itemType,
+              menuItemId: null,
+              supplyItemId: { in: submittedSupplyIds },
+            },
+          }),
+        ]
         : []),
       ...(createRows.length
         ? [prisma.bookingEventSupplyItem.createMany({ data: createRows })]
@@ -1435,11 +1460,11 @@ async function updateEventSupplyItem(req, res) {
       data: {
         ...(req.body?.quantity !== undefined
           ? {
-              quantity: Math.max(
-                1,
-                Math.min(999, parseInt(String(req.body.quantity), 10) || 1),
-              ),
-            }
+            quantity: Math.max(
+              1,
+              Math.min(999, parseInt(String(req.body.quantity), 10) || 1),
+            ),
+          }
           : {}),
         ...(req.body?.unit !== undefined
           ? { unit: String(req.body.unit || row.unit) }
@@ -1523,41 +1548,6 @@ function roundSupplyQty(n) {
   const v = Number(n) || 0;
   if (v <= 0) return 1;
   return Math.max(0.01, Math.round(v * 100) / 100);
-}
-
-const WEIGHT_UNIT_TO_G = { kg: 1000, g: 1, gram: 1, grams: 1 };
-const VOLUME_UNIT_TO_ML = {
-  ltr: 1000,
-  l: 1000,
-  litre: 1000,
-  litres: 1000,
-  liter: 1000,
-  liters: 1000,
-  ml: 1,
-  millilitre: 1,
-  millilitres: 1,
-  milliliter: 1,
-  milliliters: 1,
-};
-
-/**
- * Converts `qty` from `fromUnit` to `toUnit` when both are known weight or
- * volume units (kg/g, ltr/ml and spelling variants). Units that don't match
- * a known family (pcs, or an outright mismatch like weight vs volume) can't
- * be safely combined, so the raw quantity is returned unchanged rather than
- * silently producing a wrong number.
- */
-function convertSupplyQty(qty, fromUnit, toUnit) {
-  const from = String(fromUnit ?? "").trim().toLowerCase();
-  const to = String(toUnit ?? "").trim().toLowerCase();
-  if (!from || !to || from === to) return qty;
-  if (from in WEIGHT_UNIT_TO_G && to in WEIGHT_UNIT_TO_G) {
-    return (qty * WEIGHT_UNIT_TO_G[from]) / WEIGHT_UNIT_TO_G[to];
-  }
-  if (from in VOLUME_UNIT_TO_ML && to in VOLUME_UNIT_TO_ML) {
-    return (qty * VOLUME_UNIT_TO_ML[from]) / VOLUME_UNIT_TO_ML[to];
-  }
-  return qty;
 }
 
 function supplyUnitOptionsForRow(src, preferredUnit) {
@@ -2073,11 +2063,16 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
   });
   const bookingLevelIngredients = [];
   const bookingLevelUtensils = [];
+  const totals = { ingredients: toRows(ingredientTotals), utensils: toRows(utensilTotals) };
+  const eventsTotalById = eventsTotalByIdFromTotals(totals);
   for (const row of bookingLevelRows) {
+    // Always an extra on top of the events' amounts (older total rows converted).
+    const quantity = bookingLevelExtraQty(row, eventsTotalById);
+    if (quantity <= 0) continue;
     const out = {
       supply_item_id: row.supplyItemId,
       name: resolveLocalizedName(row.nameSnapshot, language),
-      quantity: row.quantity,
+      quantity,
       unit: row.unit,
       category_slug: row.categorySlug,
       category_label: supplyCategoryLabelFor(categoryLabelMap, row.categorySlug),
@@ -2091,10 +2086,7 @@ async function buildFullBookingSupplyBreakdown({ bookingId, businessId, userId, 
 
   return {
     events: eventsOut,
-    totals: {
-      ingredients: toRows(ingredientTotals),
-      utensils: toRows(utensilTotals),
-    },
+    totals,
     booking_level: {
       ingredients: bookingLevelIngredients,
       utensils: bookingLevelUtensils,
@@ -2257,12 +2249,12 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
       const savedSupplyRows =
         savedSupplyIds.length > 0
           ? await prisma.supplyItem.findMany({
-              where: {
-                id: { in: savedSupplyIds },
-                type: "INGREDIENT",
-                isActive: true,
-              },
-            })
+            where: {
+              id: { in: savedSupplyIds },
+              type: "INGREDIENT",
+              isActive: true,
+            },
+          })
           : [];
       const savedSupplyById = new Map(savedSupplyRows.map((r) => [r.id, r]));
       const manualOnly = [];
@@ -2484,7 +2476,7 @@ async function getSuggestedEventSupplyFromMenu(req, res) {
         const savedRow =
           perDish ||
           (eventLevel &&
-          supplyItemMenuItemCount.get(rowEntry.supply_item_id) === 1
+            supplyItemMenuItemCount.get(rowEntry.supply_item_id) === 1
             ? eventLevel
             : null);
         // A saved unit choice is still respected (unit doesn't change with
@@ -2842,9 +2834,9 @@ async function listVendors(req, res) {
     });
     const filtered = q
       ? rows.filter((row) => {
-          const hay = `${row.name} ${row.firmName ?? ""} ${row.whatsappNo ?? ""} ${row.address ?? ""}`.toLowerCase();
-          return hay.includes(q);
-        })
+        const hay = `${row.name} ${row.firmName ?? ""} ${row.whatsappNo ?? ""} ${row.address ?? ""}`.toLowerCase();
+        return hay.includes(q);
+      })
       : rows;
     return successResponse(res, apiMessage("common.ok", getRequestedLanguage(req)), { vendors: filtered.map(serializeVendor) });
   } catch (e) {
@@ -3261,6 +3253,8 @@ module.exports = {
   canViewMenuItemForSupply,
   getFullBookingPdfSupplyBreakdown,
   buildFullBookingSupplyBreakdown,
+  bookingLevelExtraQty,
+  eventsTotalByIdFromTotals,
   convertSupplyQty,
   createVendor,
   listVendors,
