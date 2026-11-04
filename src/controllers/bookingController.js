@@ -10,6 +10,7 @@ const {
   autoSaveSupplyListsForConfirmedBooking,
   deleteOrderSupplyListForBooking,
   syncOrderSupplyListForBooking,
+  refreshOrderSupplyListTitleForBooking,
 } = require("./supplySavedListController");
 
 /** Refreshes the order supply list in the background after an event edit
@@ -1031,7 +1032,7 @@ async function patchBooking(req, res) {
         const snapshotChanged =
           ev.event_snapshot !== undefined &&
           JSON.stringify(ev.event_snapshot ?? null) !==
-            JSON.stringify(exists.eventSnapshot ?? null);
+          JSON.stringify(exists.eventSnapshot ?? null);
         const dishFieldsChanged =
           (ev.dish_id !== undefined && ev.dish_id !== (exists.dishId ?? null)) ||
           (ev.parent_dish_id !== undefined &&
@@ -1065,21 +1066,21 @@ async function patchBooking(req, res) {
             status: ev.status !== undefined ? ev.status : exists.status,
             ...(touchesEventMenu && menuEditAllowed
               ? {
-                  eventSnapshot:
-                    ev.event_snapshot !== undefined
-                      ? ev.event_snapshot
-                      : exists.eventSnapshot,
-                  dishId:
-                    ev.dish_id !== undefined ? ev.dish_id : exists.dishId,
-                  parentDishId:
-                    ev.parent_dish_id !== undefined
-                      ? ev.parent_dish_id
-                      : exists.parentDishId,
-                  isTemplate:
-                    ev.is_template !== undefined
-                      ? Boolean(ev.is_template)
-                      : exists.isTemplate,
-                }
+                eventSnapshot:
+                  ev.event_snapshot !== undefined
+                    ? ev.event_snapshot
+                    : exists.eventSnapshot,
+                dishId:
+                  ev.dish_id !== undefined ? ev.dish_id : exists.dishId,
+                parentDishId:
+                  ev.parent_dish_id !== undefined
+                    ? ev.parent_dish_id
+                    : exists.parentDishId,
+                isTemplate:
+                  ev.is_template !== undefined
+                    ? Boolean(ev.is_template)
+                    : exists.isTemplate,
+              }
               : {}),
           },
         });
@@ -1134,47 +1135,47 @@ async function patchBooking(req, res) {
           const current = ev.id ? existingById.get(ev.id) : null;
           const payload = current
             ? {
-                eventAt:
-                  ev.event_at !== undefined
-                    ? (ev.event_at ? new Date(ev.event_at) : null)
-                    : current.eventAt,
-                eventLocation:
-                  ev.event_location !== undefined ? ev.event_location : current.eventLocation,
-                functionType: null,
-                jamanvarType: jamanvarTypeFromEventBody(ev, current),
-                guestCount:
-                  ev.guest_count !== undefined
-                    ? (ev.guest_count != null ? parseInt(ev.guest_count, 10) : null)
-                    : current.guestCount,
-                notes: ev.notes !== undefined ? ev.notes : current.notes,
-                status: ev.status !== undefined ? ev.status : current.status,
-                dishId: ev.dish_id !== undefined ? ev.dish_id : current.dishId,
-                parentDishId:
-                  ev.parent_dish_id !== undefined ? ev.parent_dish_id : current.parentDishId,
-                isTemplate:
-                  ev.is_template !== undefined ? ev.is_template : current.isTemplate,
-                eventSnapshot:
-                  ev.event_snapshot !== undefined ? ev.event_snapshot : current.eventSnapshot,
-                eventTotal:
-                  ev.event_total !== undefined
-                    ? (ev.event_total != null ? new Prisma.Decimal(String(ev.event_total)) : null)
-                    : current.eventTotal,
-              }
+              eventAt:
+                ev.event_at !== undefined
+                  ? (ev.event_at ? new Date(ev.event_at) : null)
+                  : current.eventAt,
+              eventLocation:
+                ev.event_location !== undefined ? ev.event_location : current.eventLocation,
+              functionType: null,
+              jamanvarType: jamanvarTypeFromEventBody(ev, current),
+              guestCount:
+                ev.guest_count !== undefined
+                  ? (ev.guest_count != null ? parseInt(ev.guest_count, 10) : null)
+                  : current.guestCount,
+              notes: ev.notes !== undefined ? ev.notes : current.notes,
+              status: ev.status !== undefined ? ev.status : current.status,
+              dishId: ev.dish_id !== undefined ? ev.dish_id : current.dishId,
+              parentDishId:
+                ev.parent_dish_id !== undefined ? ev.parent_dish_id : current.parentDishId,
+              isTemplate:
+                ev.is_template !== undefined ? ev.is_template : current.isTemplate,
+              eventSnapshot:
+                ev.event_snapshot !== undefined ? ev.event_snapshot : current.eventSnapshot,
+              eventTotal:
+                ev.event_total !== undefined
+                  ? (ev.event_total != null ? new Prisma.Decimal(String(ev.event_total)) : null)
+                  : current.eventTotal,
+            }
             : {
-                eventAt: ev.event_at ? new Date(ev.event_at) : null,
-                eventLocation: ev.event_location ?? null,
-                functionType: null,
-                jamanvarType: jamanvarTypeFromEventBody(ev, null),
-                guestCount: ev.guest_count != null ? parseInt(ev.guest_count, 10) : null,
-                notes: ev.notes ?? null,
-                status: ev.status ?? "PENDING",
-                dishId: ev.dish_id ?? null,
-                parentDishId: ev.parent_dish_id ?? null,
-                isTemplate: ev.is_template ?? null,
-                eventSnapshot: ev.event_snapshot ?? null,
-                eventTotal:
-                  ev.event_total != null ? new Prisma.Decimal(String(ev.event_total)) : null,
-              };
+              eventAt: ev.event_at ? new Date(ev.event_at) : null,
+              eventLocation: ev.event_location ?? null,
+              functionType: null,
+              jamanvarType: jamanvarTypeFromEventBody(ev, null),
+              guestCount: ev.guest_count != null ? parseInt(ev.guest_count, 10) : null,
+              notes: ev.notes ?? null,
+              status: ev.status ?? "PENDING",
+              dishId: ev.dish_id ?? null,
+              parentDishId: ev.parent_dish_id ?? null,
+              isTemplate: ev.is_template ?? null,
+              eventSnapshot: ev.event_snapshot ?? null,
+              eventTotal:
+                ev.event_total != null ? new Prisma.Decimal(String(ev.event_total)) : null,
+            };
 
           if (current) {
             await tx.bookingEvent.update({
@@ -1213,18 +1214,18 @@ async function patchBooking(req, res) {
     const needsPricingRecalc = patchTouchesBookingPricing(body, existing);
     let pricing = needsPricingRecalc
       ? computePricingFromSnapshots(
-          await prisma.bookingMenuItem.findMany({ where: { bookingId } }),
-          guests,
-          discount,
-          sc,
-          txp,
-        )
+        await prisma.bookingMenuItem.findMany({ where: { bookingId } }),
+        guests,
+        discount,
+        sc,
+        txp,
+      )
       : {
-          subtotal: num(existing.subtotal),
-          serviceChargeAmount: num(existing.serviceChargeAmount),
-          taxAmount: num(existing.taxAmount),
-          totalDue: num(existing.totalDue),
-        };
+        subtotal: num(existing.subtotal),
+        serviceChargeAmount: num(existing.serviceChargeAmount),
+        taxAmount: num(existing.taxAmount),
+        totalDue: num(existing.totalDue),
+      };
     const dueSnapshot = await prisma.booking.findUnique({
       where: { id: bookingId },
       select: {
@@ -1311,8 +1312,8 @@ async function patchBooking(req, res) {
     const draftOnly =
       isDraft && body.step_number != null
         ? {
-            stepNumber: Math.min(5, Math.max(1, parseInt(body.step_number, 10))),
-          }
+          stepNumber: Math.min(5, Math.max(1, parseInt(body.step_number, 10))),
+        }
         : {};
 
     const updated = await prisma.booking.update({
@@ -1326,6 +1327,17 @@ async function patchBooking(req, res) {
         events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
       },
     });
+    // The order supply list's title is "Customer - Event type".
+    if (
+      updated.customerName !== existing.customerName ||
+      updated.functionType !== existing.functionType
+    ) {
+      void refreshOrderSupplyListTitleForBooking({
+        bookingId,
+        businessId: req.businessId,
+        language: getRequestedLanguage(req),
+      });
+    }
 
     return successResponse(
       res,
@@ -1687,7 +1699,7 @@ async function getBookingEvent(req, res) {
     const serialized = serializeBookingEvent(target);
     const effectiveEventLocation =
       typeof serialized.event_location === "string" &&
-      serialized.event_location.trim()
+        serialized.event_location.trim()
         ? serialized.event_location
         : customerAddress;
 
@@ -2075,36 +2087,36 @@ async function listBookings(req, res) {
         skip,
         ...(isLite
           ? {
-              select: {
-                id: true,
-                bookingCode: true,
-                customerName: true,
-                customerPhone: true,
-                status: true,
-                paymentStatus: true,
-                eventAt: true,
-                eventRangeStart: true,
-                eventRangeEnd: true,
-                guestCount: true,
-                totalDue: true,
-                amountPaid: true,
-                createdAt: true,
-                /** All events (not just the next one) — small rows, needed for the meal-type list on the Orders card. */
-                events: {
-                  select: { eventAt: true, jamanvarType: true },
-                  orderBy: { eventAt: "asc" },
-                },
-                _count: { select: { events: true } },
+            select: {
+              id: true,
+              bookingCode: true,
+              customerName: true,
+              customerPhone: true,
+              status: true,
+              paymentStatus: true,
+              eventAt: true,
+              eventRangeStart: true,
+              eventRangeEnd: true,
+              guestCount: true,
+              totalDue: true,
+              amountPaid: true,
+              createdAt: true,
+              /** All events (not just the next one) — small rows, needed for the meal-type list on the Orders card. */
+              events: {
+                select: { eventAt: true, jamanvarType: true },
+                orderBy: { eventAt: "asc" },
               },
-            }
+              _count: { select: { events: true } },
+            },
+          }
           : {
-              include: {
-                menuItems: true,
-                extraServiceLines: true,
-                events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
-                payments: { orderBy: { createdAt: "desc" }, take: 5 },
-              },
-            }),
+            include: {
+              menuItems: true,
+              extraServiceLines: true,
+              events: { orderBy: [{ eventAt: "asc" }, { createdAt: "asc" }] },
+              payments: { orderBy: { createdAt: "desc" }, take: 5 },
+            },
+          }),
       }),
       prisma.booking.count({ where }),
     ]);

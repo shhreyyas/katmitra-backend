@@ -271,6 +271,34 @@ async function autoSaveSupplyListsForConfirmedBooking({ businessId, userId, lang
 }
 
 /**
+ * Rewrites an order list's stored title from the booking's current customer
+ * name and event type, so title search finds it after a rename (readers get
+ * the live title from resolveSavedListTitle either way).
+ */
+async function refreshOrderSupplyListTitle({ list, booking, language }) {
+  if (!booking?.customerName) return;
+  const title = buildSavedListTitle({ booking, language });
+  const current =
+    list.title ??
+    (await prisma.supplySavedList.findUnique({ where: { id: list.id }, select: { title: true } }))?.title;
+  if (current === title) return;
+  await prisma.supplySavedList.update({ where: { id: list.id }, data: { title } });
+}
+
+/** Refreshes a booking's order list title after the booking itself changed. Best-effort. */
+async function refreshOrderSupplyListTitleForBooking({ bookingId, businessId, language }) {
+  try {
+    const list = await prisma.supplySavedList.findFirst({
+      where: { businessId, bookingId },
+      select: { id: true, title: true, booking: { select: { customerName: true, functionType: true } } },
+    });
+    if (list) await refreshOrderSupplyListTitle({ list, booking: list.booking, language });
+  } catch (err) {
+    console.warn(`refreshOrderSupplyListTitleForBooking: failed for booking ${bookingId}:`, err.message);
+  }
+}
+
+/**
  * Regenerates an order list's items from the booking's current menu, guest
  * counts and supply rows (an order with nothing yet gets an empty list).
  * Best-effort: on any failure the previously saved items are served as-is.
@@ -280,9 +308,10 @@ async function syncOrderSupplyList({ list, businessId, userId, language }) {
   try {
     const booking = await prisma.booking.findFirst({
       where: { id: list.bookingId, businessId },
-      select: { status: true },
+      select: { status: true, customerName: true, functionType: true },
     });
     if (!booking || booking.status === "CANCELLED") return;
+    await refreshOrderSupplyListTitle({ list, booking, language });
 
     const lines = await computeOrderSupplyLines({
       businessId,
@@ -702,21 +731,16 @@ async function createSupplySavedList(req, res) {
  * first event at creation time (see bookingController.js) — good enough as
  * a representative value even though the booking may span several events.
  */
-const TITLE_LANGUAGES = ["en", "hi", "gu"];
-
 /**
- * An order list's title is generated ("Customer - Event type") in whatever
- * language the creating request used. Re-derive it in the reader's language,
- * unless the stored title is something the user typed themselves.
+ * An order list's title is always "Customer - Event type" taken from the
+ * booking as it is now, in the reader's language, so renaming the customer
+ * or changing the event type shows on the list (order lists can't be
+ * renamed by the user; their edits go to the booking's supply).
  */
 function resolveSavedListTitle(row, lang) {
   const customerName = row.booking?.customerName;
   if (!row.bookingId || !customerName) return row.title;
   const booking = { customerName, functionType: row.booking.functionType };
-  const generated = TITLE_LANGUAGES.map((language) =>
-    buildSavedListTitle({ booking, language }),
-  );
-  if (!generated.includes(row.title)) return row.title;
   return buildSavedListTitle({ booking, language: lang });
 }
 
@@ -1258,4 +1282,6 @@ module.exports = {
   autoSaveSupplyListsForConfirmedBooking,
   deleteOrderSupplyListForBooking,
   syncOrderSupplyListForBooking,
+  refreshOrderSupplyListTitleForBooking,
+  resolveSavedListTitle,
 };
